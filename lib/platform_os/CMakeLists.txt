@@ -24,6 +24,7 @@ include_directories(
 set(SOURCES
     edk2_debug.c
     sleep.cpp
+    processor_os.cpp
 )
 
 # Create static library

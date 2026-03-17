@@ -1,0 +1,16 @@
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y \
+    cmake \
+    clang-18 \
+    nasm \
+    git \
+    libjsoncpp-dev \
+    libssl-dev \
+    pkg-config \
+    libc-ares-dev \
+    uuid-dev \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /repo

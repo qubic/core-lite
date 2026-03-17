@@ -78,6 +78,65 @@ A special case is testing the QPI functions output after loading the state from 
 For simplified, automated, and isolated testing of components, we use the "test" project.
 It is based on the Google Test framework and runs in your OS, facilitating easy debugging within your dev environment.
 
+### Running Contract Tests on Linux
+
+#### Prerequisites
+
+```bash
+apt install clang-18 cmake nasm
+```
+
+#### Build and run
+
+```bash
+cmake -B build \
+  -DCMAKE_C_COMPILER=clang-18 \
+  -DCMAKE_CXX_COMPILER=clang++-18 \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DBUILD_TESTS=ON \
+  -DBUILD_BINARY=OFF \
+  -DBUILD_BENCHMARK=OFF \
+  -DENABLE_AVX512=OFF
+
+cmake --build build --target qubic_core_tests -j$(nproc)
+
+cd build && ctest --output-on-failure -R QSB
+```
+
+Replace `-R QSB` with any test name filter, or omit it to run all enabled tests.
+
+#### Using Docker
+
+From the repo root:
+
+```bash
+# Build image (once)
+docker build -f Dockerfile.test -t qubic-core-tests --platform linux/amd64 .
+
+# Run tests
+docker run --rm \
+  --platform linux/amd64 \
+  -v $(pwd):/repo \
+  -v qubic-build-cache:/repo/build \
+  qubic-core-tests \
+  bash -c "rm -f build/CMakeCache.txt && \
+    cmake -B build \
+      -DCMAKE_BUILD_TYPE=Debug \
+      -DCMAKE_CXX_COMPILER=clang++-18 \
+      -DCMAKE_C_COMPILER=clang-18 \
+      -DBUILD_TESTS=ON \
+      -DBUILD_BINARY=OFF \
+      -DBUILD_BENCHMARK=OFF \
+      -DENABLE_AVX512=OFF \
+      -Wno-dev && \
+    cmake --build build --target qubic_core_tests -j4 && \
+    cd build && ctest --output-on-failure -R QSB"
+```
+
+#### Enabling additional tests
+
+Most test files are disabled by default in `test/CMakeLists.txt`. To enable one, uncomment its entry in the `add_executable` block and add `common_def.cpp` and `stdlib_impl.cpp` if not already present.
+
 ### Score test
 
 The Score Test will compare the generated results with the ground-truth files located in test/data.

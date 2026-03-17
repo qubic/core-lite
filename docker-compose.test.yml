@@ -1,0 +1,14 @@
+services:
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    platform: linux/amd64
+    volumes:
+      - .:/repo
+      - build-cache:/repo/build
+    working_dir: /repo
+    command: bash -c "rm -f build/CMakeCache.txt && cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++-18 -DCMAKE_C_COMPILER=clang-18 -DBUILD_TESTS=ON -DBUILD_BINARY=OFF -DBUILD_BENCHMARK=OFF -DENABLE_AVX512=OFF -Wno-dev && cmake --build build --target qubic_core_tests -j4 && cd build && ctest --output-on-failure -R QSB"
+
+volumes:
+  build-cache:
