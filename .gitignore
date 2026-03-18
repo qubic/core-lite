@@ -22,3 +22,23 @@ out/build/
 
 # Clion
 .idea/
+
+# Docker debug build (created by interactive docker run during local testing)
+/docker-build/
+
+# Qubic node runtime files (generated when running the node locally from repo root)
+/system
+/spectrum.*
+/universe.*
+/contract0???.???
+
+# Tick storage snapshots (generated when TICK_STORAGE_AUTOSAVE_MODE is enabled)
+snapshot*.*
+snapshotOracleEngine.*
+snapshotOracleQueryMetadata.*
+snapshotOracleQueryData.*
+snapshotOracleReplyStates.*
+snapshotOracleSubscriptions.*
+snapshotOracleSubscribers.*
+snapshotTxStatusData
+snapshotConfirmedTx

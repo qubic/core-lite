@@ -16,12 +16,12 @@
 
 ////////////////// USER CONFIGURABLE OPTIONS (default is for mainnet with swap feature) \\\\\\\\\\\\\\\\
 
-// #define TESTNET // UNCOMMENT this line if you want to compile for testnet
-// #define TESTNET_PREFILL_QUS // UNCOMMENT this line if you want to send test QUs to computors/custom address at epoch begin
+#define TESTNET // UNCOMMENT this line if you want to compile for testnet
+#define TESTNET_PREFILL_QUS // UNCOMMENT this line if you want to send test QUs to computors/custom address at epoch begin
 // this option enables using disk as RAM to reduce hardware requirement for qubic core node
 // it is highly recommended to enable this option if you want to run a full mainnet node on SSD
 // UNCOMMENT this line to enable it
-#define USE_SWAP
+// #define USE_SWAP
 
 //////////////////////////////////////////////////////////////
 

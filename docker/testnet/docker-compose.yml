@@ -1,0 +1,21 @@
+services:
+  qubic-testnet:
+    platform: linux/amd64
+    build:
+      context: ../..           # core-lite/ root
+      dockerfile: docker/testnet/Dockerfile
+    image: qubic-testnet:latest
+    container_name: qubic-testnet
+    restart: unless-stopped
+    ports:
+      - "31841:31841"          # P2P testnet
+      - "41841:41841"          # HTTP RPC API
+    volumes:
+      - qubic-testnet-data:/qubic
+    environment:
+      TICKING_DELAY: "1000"   # ms per tick (testnet default 7000; 1000 = faster)
+      QUBIC_DATA_DIR: "/qubic"
+    stop_grace_period: 30s
+
+volumes:
+  qubic-testnet-data:
