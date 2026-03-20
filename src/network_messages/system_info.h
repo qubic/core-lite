@@ -44,12 +44,12 @@ struct RespondSystemInfo
     // Starts to be meaningful if >50% of spectrum is filled but may still change after that.
     unsigned long long currentEntityBalanceDustThreshold;
 
-    unsigned int targetTickVoteSignature;
+    unsigned long long targetTickVoteSignature;
     unsigned long long computorPacketSignature;
     unsigned long long solutionAdditionalThreshold; // solution threshold for additional mining algorithm
     unsigned long long _reserve2;
     unsigned long long _reserve3;
-    unsigned long long _reserve4;
+    unsigned int _reserve4;
 };
 #pragma pack(pop)
 

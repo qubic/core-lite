@@ -71,10 +71,6 @@ unsigned long long now_ms()
     return ms((unsigned char)(tm->tm_year % 100), tm->tm_mon, tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec, 0);
 }
 
-bool isMainProcessor() {
-    return true;
-}
-
 inline std::map<unsigned long long, bool> commitMemMap;
 
 #ifdef _MSC_VER
