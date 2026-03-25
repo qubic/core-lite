@@ -46,7 +46,7 @@ jobs:
           cmake -S . -B ${{ inputs.build_dir }} \
             -DCMAKE_BUILD_TYPE=${{ inputs.configuration }} \
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-            -DBUILD_TESTS:BOOL=OFF \
+            -DBUILD_TESTS:BOOL=ON \
             -DBUILD_BINARY:BOOL=ON \
             -DENABLE_AVX512=OFF \
             -DUSE_SANITIZER=OFF \

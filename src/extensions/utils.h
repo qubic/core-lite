@@ -201,5 +201,3 @@ static size_t alignToPageSize(size_t address)
     size_t page_size = SYSTEM_PAGE_SIZE;
     return (address + page_size - 1) & ~(page_size - 1);
 }
-
-#define _bswap_32(x) (x)

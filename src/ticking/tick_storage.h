@@ -10,6 +10,7 @@
 #include "platform/global_var.h"
 
 #include "public_settings.h"
+#include "private_settings.h"
 #include "extensions/utils.h"
 #include "platform/virtual_memory.h"
 
@@ -18,12 +19,14 @@
 #define TX00_AS_NUMBER 13511005048406132ULL
 #define TXDI_AS_NUMBER 29555302059212916ULL
 #define DATA_AS_NUMBER 27303570963497060ULL
+#define TXOF_AS_NUMBER (wcharToNumber(L"txof"))
 
 #define CACHE_PAGE 32
 #define TICK_DATA_PAGE_CAPACITY 128 // one page can hold data for 128 ticks
 #define TICKS_PAGE_CAPACITY (64 * NUMBER_OF_COMPUTORS) // one page can hold data for 64 ticks
 #define TRANSACTION_PAGE_CAPACITY (NUMBER_OF_TRANSACTIONS_PER_TICK * 16) // one page can hold data for AT LEAST 16 ticks
 #define TRANSACTION_DIGEST_HASHMAP_PAGE_CAPACITY (NUMBER_OF_TRANSACTIONS_PER_TICK * 64)
+#define TRANSACTION_OFFSET_PAGE_CAPACITY (NUMBER_OF_TRANSACTIONS_PER_TICK * 1024 * 2)
 
 #if TICK_STORAGE_AUTOSAVE_MODE
 static wchar_t SNAPSHOT_METADATA_FILE_NAME[] = L"snapshotMetadata.???";
@@ -93,6 +96,7 @@ private:
 
     // Allocated tickTransactionOffsets buffer with tickTransactionOffsetsLength elements (includes current and previous epoch data)
     inline static unsigned long long* tickTransactionOffsetsPtr = nullptr;
+    inline static SwapVirtualMemory<unsigned long long, TXOF_AS_NUMBER, DATA_AS_NUMBER, TRANSACTION_OFFSET_PAGE_CAPACITY, CACHE_PAGE, SwapMode::INDEX_MODE, 0> tickTransactionOffsetsSwapVM;
 
     // Tick data of previous epoch. Points to tickData + MAX_NUMBER_OF_TICKS_PER_EPOCH
     inline static TickData* oldTickDataPtr = nullptr;
@@ -230,6 +234,28 @@ private:
     }
     bool saveTickTransactionOffsets(unsigned long long nTick, CHAR16* directory = NULL)
     {
+#ifdef USE_SWAP
+        void *buffer = nullptr;
+        if (!allocPoolWithErrorLog(L"saveTickTransactionOffsetsBuffer", tickTransactionOffsetsSwapVM.getVmStateSize(), &buffer, __LINE__))
+        {
+            return false;
+        }
+        unsigned long long sz = tickTransactionOffsetsSwapVM.dumpVMState((unsigned char*)buffer);
+        if (sz != tickTransactionOffsetsSwapVM.getVmStateSize())
+        {
+            logToConsole(L"Something went wrong when dumping tickTransactionOffsetsSwapVM state");
+            freePool(buffer);
+            return false;
+        }
+        auto writtenSize = saveLargeFile(SNAPSHOT_TICK_TRANSACTION_OFFSET_FILE_NAME, tickTransactionOffsetsSwapVM.getVmStateSize(), (unsigned char*)buffer, directory);
+        if (writtenSize != tickTransactionOffsetsSwapVM.getVmStateSize())
+        {
+            freePool(buffer);
+            return false;
+        }
+        freePool(buffer);
+        return true;
+#else
         long long totalWriteSize = nTick * sizeof(tickTransactionOffsetsPtr[0]) * NUMBER_OF_TRANSACTIONS_PER_TICK;
         auto sz = saveLargeFile(SNAPSHOT_TICK_TRANSACTION_OFFSET_FILE_NAME, totalWriteSize, (unsigned char*)tickTransactionOffsetsPtr, directory);
         if (sz != totalWriteSize)
@@ -237,6 +263,7 @@ private:
             return false;
         }
         return true;
+#endif
     }
     bool saveTransactions(unsigned long long nTick, long long& outTotalTransactionSize, unsigned long long& outNextTickTransactionOffset, CHAR16* directory = NULL)
     {
@@ -403,6 +430,30 @@ private:
     }
     bool loadTickTransactionOffsets(unsigned long long nTick, CHAR16* directory = NULL)
     {
+#ifdef USE_SWAP
+        unsigned long long totalLoadSize = tickTransactionOffsetsSwapVM.getVmStateSize();
+        void *buffer = nullptr;
+        if (!allocPoolWithErrorLog(L"loadTickTransactionOffsetsBuffer", totalLoadSize, &buffer, __LINE__))
+        {
+            return false;
+        }
+        auto sz = loadLargeFile(SNAPSHOT_TICK_TRANSACTION_OFFSET_FILE_NAME, totalLoadSize, (unsigned char*)buffer, directory);
+        if (sz != totalLoadSize)
+        {
+            logToConsole(L"Error loadTickTransactionOffsets");
+            freePool(buffer);
+            return false;
+        }
+        unsigned long long res = tickTransactionOffsetsSwapVM.loadVMState((unsigned char*)buffer);
+        freePool(buffer);
+        if (res != totalLoadSize)
+        {
+            logToConsole(L"Error loading tickTransactionOffsetsSwapVM state");
+            return false;
+        }
+
+        return true;
+#else
         long long totalLoadSize = nTick * sizeof(tickTransactionOffsetsPtr[0]) * NUMBER_OF_TRANSACTIONS_PER_TICK;
         auto sz = loadLargeFile(SNAPSHOT_TICK_TRANSACTION_OFFSET_FILE_NAME, totalLoadSize, (unsigned char*)tickTransactionOffsetsPtr, directory);
         if (sz != totalLoadSize)
@@ -410,6 +461,7 @@ private:
             return false;
         }
         return true;
+#endif
     }
     bool loadTransactions(unsigned long long nTick, unsigned long long totalLoadSize, CHAR16* directory = NULL)
     {
@@ -653,7 +705,11 @@ public:
 
     static unsigned long long getTickTransactionOffsetSize()
     {
+#ifdef USE_SWAP
+        return tickTransactionOffsetsSwapVM.getVmStateSize();
+#else
         return tickTransactionOffsetsSize;
+#endif
     }
 
     static unsigned long long getTickTransactionsDigestPtrSize()
@@ -679,9 +735,8 @@ public:
         // TODO: allocate everything with one continuous buffer
 		constexpr auto total = tickDataSize + ticksSize + tickTransactionsSize + tickTransactionOffsetsSize + (tickTransactionOffsetsLengthCurrentEpoch * sizeof(TransactionsDigestAccess::HashMapEntry));
 
-        // will be used no matter USE_SWAP is enabled or not
-        if (!allocPoolWithErrorLog(L"tickTransactionOffset", tickTransactionOffsetsSize, (void**)&tickTransactionOffsetsPtr, __LINE__, true, true)
-            || !allocPoolWithErrorLog(L"tickTransactionsDigestPtr", tickTransactionOffsetsLengthCurrentEpoch * sizeof(TransactionsDigestAccess::HashMapEntry), (void**)&tickTransactionsDigestPtr, __LINE__, true, true))
+        if (!allocPoolWithErrorLog(L"tickTransactionOffset", tickTransactionOffsetsSize, (void**)&tickTransactionOffsetsPtr, __LINE__, true, false)
+            || !allocPoolWithErrorLog(L"tickTransactionsDigestPtr", tickTransactionOffsetsLengthCurrentEpoch * sizeof(TransactionsDigestAccess::HashMapEntry), (void**)&tickTransactionsDigestPtr, __LINE__, true, false))
         {
             return false;
         }
@@ -699,6 +754,7 @@ public:
         ticksSwapVM.init();
         tickTransactionsSwapVM.init();
         tickTransactionsDigestSwapVM.init();
+        tickTransactionOffsetsSwapVM.init();
 #endif
 
         ASSERT(tickDataLock == 0);
@@ -918,6 +974,7 @@ public:
             ticksSwapVM.reset();
             tickTransactionsSwapVM.reset();
             tickTransactionsDigestSwapVM.reset();
+            tickTransactionOffsetsSwapVM.reset();
 #endif
 
 #ifndef NDEBUG
@@ -1313,7 +1370,12 @@ public:
         inline static unsigned long long* getByTickIndex(unsigned int tickIndex)
         {
             ASSERT(tickIndex < tickDataLength);
+#ifdef USE_SWAP
+            return tickTransactionOffsetsSwapVM.getPtr(tickIndex * NUMBER_OF_TRANSACTIONS_PER_TICK);
+#else
+            qVirtualCommit(tickTransactionOffsetsPtr + (tickIndex * NUMBER_OF_TRANSACTIONS_PER_TICK), NUMBER_OF_TRANSACTIONS_PER_TICK * sizeof(unsigned long long));
             return tickTransactionOffsetsPtr + (tickIndex * NUMBER_OF_TRANSACTIONS_PER_TICK);
+#endif
         }
 
         // Return pointer to offset array of transactions of tick in current epoch by tick (checking tick with ASSERT)
@@ -1412,6 +1474,7 @@ public:
 #ifdef USE_SWAP
             return (HashMapEntry&)tickTransactionsDigestSwapVM.getRef(index);
 #else
+            qVirtualCommit(tickTransactionsDigestPtr + index * sizeof(HashMapEntry), sizeof(HashMapEntry));
             HashMapEntry* pHashMap = (HashMapEntry*)tickTransactionsDigestPtr;
             return pHashMap[index];
 #endif

@@ -1,6 +1,7 @@
 #define NO_UEFI
 
 #ifdef __linux__
+#include <iomanip>
 #include "platform/m256.h"
 #endif
 
