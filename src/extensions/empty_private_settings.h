@@ -32,6 +32,8 @@ static const unsigned char whiteListPeers[][4] = {
 };
 */
 
+#define SEND_DOGE_ORACLE_QUERIES
+
 static const unsigned char oracleMachineIPs[][4] = {
     {127, 0, 0, 1}, // REMOVE THIS ENTRY AND REPLACE IT WITH YOUR OWN IP ADDRESSES
 };

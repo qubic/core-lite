@@ -324,6 +324,7 @@ TEST(OracleEngine, ContractQuerySuccess)
 
 	// no notifications
 	EXPECT_EQ(oracleEngine1.getNotification(), nullptr);
+	EXPECT_EQ(oracleEngine1.getFinishedUserQuery(), nullptr);
 
 	//-------------------------------------------------------------------------
 	// create and process enough reply commit tx to trigger reveal tx
@@ -413,6 +414,7 @@ TEST(OracleEngine, ContractQuerySuccess)
 
 	// no additional notifications
 	EXPECT_EQ(oracleEngine1.getNotification(), nullptr);
+	EXPECT_EQ(oracleEngine1.getFinishedUserQuery(), nullptr);
 
 	EXPECT_EQ(oracleEngine1.getOracleQueryStatus(queryId), ORACLE_QUERY_STATUS_SUCCESS);
 
@@ -586,6 +588,7 @@ TEST(OracleEngine, ContractQueryUnresolvable)
 
 	// no additional notifications
 	EXPECT_EQ(oracleEngine1.getNotification(), nullptr);
+	EXPECT_EQ(oracleEngine1.getFinishedUserQuery(), nullptr);
 
 	EXPECT_EQ(oracleEngine1.getOracleQueryStatus(queryId), ORACLE_QUERY_STATUS_UNRESOLVABLE);
 
@@ -746,6 +749,7 @@ TEST(OracleEngine, ContractQueryWrongKnowledgeProof)
 
 	// no additional notifications
 	EXPECT_EQ(oracleEngine1.getNotification(), nullptr);
+	EXPECT_EQ(oracleEngine1.getFinishedUserQuery(), nullptr);
 
 	EXPECT_EQ(oracleEngine1.getOracleQueryStatus(queryId), ORACLE_QUERY_STATUS_UNRESOLVABLE);
 
@@ -824,6 +828,7 @@ TEST(OracleEngine, ContractQueryTimeout)
 
 	// no additional notifications
 	EXPECT_EQ(oracleEngine1.getNotification(), nullptr);
+	EXPECT_EQ(oracleEngine1.getFinishedUserQuery(), nullptr);
 
 	EXPECT_EQ(oracleEngine1.getOracleQueryStatus(queryId), ORACLE_QUERY_STATUS_TIMEOUT);
 
@@ -1117,6 +1122,7 @@ TEST(OracleEngine, MultiContractQuerySuccess)
 	// no additional notifications
 	EXPECT_EQ(oracleEngine1.getNotification(), nullptr);
 	EXPECT_EQ(pendingNotificationQueryIds.size(), 0);
+	EXPECT_EQ(oracleEngine1.getFinishedUserQuery(), nullptr);
 
 	//-------------------------------------------------------------------------
 	// revenue
@@ -1258,6 +1264,7 @@ TEST(OracleEngine, UserQuerySuccess)
 
 	// no notifications
 	EXPECT_EQ(oracleEngine1.getNotification(), nullptr);
+	EXPECT_EQ(oracleEngine1.getFinishedUserQuery(), nullptr);
 
 	//-------------------------------------------------------------------------
 	// create and process enough reply commit tx to trigger reveal tx
@@ -1353,6 +1360,12 @@ TEST(OracleEngine, UserQuerySuccess)
 	oracleEngine1.checkStateConsistencyWithAssert();
 	oracleEngine2.checkStateConsistencyWithAssert();
 	oracleEngine3.checkStateConsistencyWithAssert();
+
+	// User query notification test
+	const OracleQueryMetadata* oqm = oracleEngine1.getFinishedUserQuery();
+	EXPECT_NE(oqm, nullptr);
+	EXPECT_EQ(oqm->queryId, queryId);
+	EXPECT_EQ(oracleEngine1.getFinishedUserQuery(), nullptr);
 }
 
 // For simplified checking of timestamps define + for adding minutes
@@ -1834,6 +1847,8 @@ TEST(OracleEngine, Subscription)
 		{ CCF_CONTRACT_INDEX },
 		notificationProcId, qid26, ORACLE_QUERY_STATUS_TIMEOUT, subscriptionId0);
 	EXPECT_EQ(oracleEngine.getNotification(), nullptr);
+
+	EXPECT_EQ(oracleEngine.getFinishedUserQuery(), nullptr);
 
 	oracleEngine.checkStateConsistencyWithAssert();
 }

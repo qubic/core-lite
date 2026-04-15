@@ -58,6 +58,16 @@ struct CustomMiningSolutionTransaction : public Transaction
     }
 };
 
+// Define in doc/protocol.md
+constexpr int DOGE_MINING_SHARE_COUNTER_INPUT_TYPE = 11;
+struct DogeMiningShareTransaction : public Transaction
+{
+    static constexpr unsigned char transactionType()
+    {
+        return DOGE_MINING_SHARE_COUNTER_INPUT_TYPE;
+    }
+};
+
 struct CustomMiningTaskV2 {
     unsigned long long taskIndex;
     unsigned char m_template[896];
@@ -137,6 +147,7 @@ struct BroadcastCustomMiningTransaction
 };
 
 static BroadcastCustomMiningTransaction gCustomMiningBroadcastTxBuffer[NUMBER_OF_COMPUTORS];
+static BroadcastCustomMiningTransaction gDogeMiningBroadcastTxBuffer[NUMBER_OF_COMPUTORS];
 
 class CustomMiningSharesCounter
 {
@@ -179,6 +190,7 @@ protected:
     }
 
 public:
+
     static constexpr unsigned int _customMiningSolutionCounterDataSize = sizeof(_shareCount) + sizeof(_accumulatedSharesCount);
     void init()
     {
@@ -1230,6 +1242,7 @@ static CustomMininingCache<CustomMiningSolutionV2CacheEntry, MAX_NUMBER_OF_CUSTO
 
 static CustomMiningStorage gCustomMiningStorage;
 static CustomMiningStats gCustomMiningStats;
+static CustomMiningStats gDogeMiningStats;
 
 
 static int customMiningInitialize()

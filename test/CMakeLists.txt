@@ -53,7 +53,9 @@ add_executable(
    		contract_qx.cpp
    		contract_rl.cpp
    		contract_testex.cpp
+		contract_escrow.cpp
    		custom_mining.cpp
+		custom_qubic_mining_storage.cpp
    		file_io.cpp
    		# fourq.cpp
    		kangaroo_twelve.cpp
@@ -66,6 +68,7 @@ add_executable(
    		qpi_collection.cpp
    		qpi_date_time.cpp
    		qpi_hash_map.cpp
+		qpi_linked_list.cpp
    		revenue.cpp
    		score.cpp
    		score_cache.cpp

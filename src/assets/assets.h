@@ -195,10 +195,14 @@ static void deinitAssets()
     }
 }
 
-static long long issueAsset(const m256i& issuerPublicKey, const char name[7], char numberOfDecimalPlaces, const char unitOfMeasurement[7], long long numberOfShares, unsigned short managingContractIndex,
+static long long issueAsset(const m256i& issuerPublicKey, const char __name[7], char numberOfDecimalPlaces, const char unitOfMeasurement[7], long long numberOfShares, unsigned short managingContractIndex,
     int* issuanceIndex, int* ownershipIndex, int* possessionIndex)
 {
     PROFILE_SCOPE();
+
+    // Some compilers do not guarantee that "TOKEN" is padded with char[7] + null terminator
+    char name[8] = {0};
+    strcpy(name, __name);
 
     *issuanceIndex = issuerPublicKey.m256i_u32[0] & (ASSETS_CAPACITY - 1);
 
