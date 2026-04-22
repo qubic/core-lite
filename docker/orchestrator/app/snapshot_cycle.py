@@ -23,17 +23,25 @@ logger = logging.getLogger(__name__)
 # Lock coordination threshold: skip cycle if another source
 # uploaded a snapshot within this many ticks of our local tick.
 LOCK_TICK_THRESHOLD = 100
-# Match snapshot archives (both .zip and .tar.zst)
-_SNAPSHOT_RE = re.compile(r"^ep(\d+)-t(\d+)-snap\.(zip|tar\.zst)$")
+# Match chunked-snapshot folders in an epoch directory (new layout).
+_SNAPSHOT_DIR_RE = re.compile(r"^snap-t(\d+)$")
+# Match legacy single-file snapshots (.zip / .tar.zst). Still recognised by
+# cleanup so pre-existing files on the remote get swept up eventually.
+_SNAPSHOT_FILE_RE = re.compile(r"^ep(\d+)-t(\d+)-snap\.(zip|tar\.zst)$")
+# Format tag written into the sidecar/index so downloaders know what to expect.
+SNAPSHOT_FORMAT_CHUNKED = "chunked-tar-zst"
+SNAPSHOT_FORMAT_SINGLE = "single-file"
+SNAPSHOT_FORMAT_VERSION = 1
 
 
 class SnapshotCycle:
     """Source mode: periodically trigger, package, and upload snapshots.
 
     Uses lock-based coordination so multiple source nodes don't upload
-    duplicate/overlapping snapshots.  Naming convention::
+    duplicate/overlapping snapshots.  Remote layout::
 
-        Archive:  {epoch}/ep{epoch}-t{tick}-snap.zip
+        Chunks:   {epoch}/snap-t{tick}/chunk.00, chunk.01, ...   (chunked tar.zst)
+        Archive:  {epoch}/ep{epoch}-t{tick}-snap.{zip,tar.zst}   (single-file fallback)
         Sidecar:  {epoch}/ep{epoch}-t{tick}-snap.json
         Index:    {epoch}/ep{epoch}-latest-snap.json
         Lock:     {epoch}/snap.lock
@@ -65,6 +73,10 @@ class SnapshotCycle:
     def _archive_key(self, epoch: int, tick: int) -> str:
         ext = "tar.zst" if self._config.package_compression == "tar.zst" else "zip"
         return f"{epoch}/ep{epoch}-t{tick}-snap.{ext}"
+
+    @staticmethod
+    def _snapshot_dir_key(epoch: int, tick: int) -> str:
+        return f"{epoch}/snap-t{tick}"
 
     @staticmethod
     def _sidecar_key(epoch: int, tick: int) -> str:
@@ -429,6 +441,8 @@ class SnapshotCycle:
             "checksum": checksum,
             "size_bytes": archive_path.stat().st_size,
             "node_id": self._node_id,
+            "format": SNAPSHOT_FORMAT_SINGLE,
+            "format_version": SNAPSHOT_FORMAT_VERSION,
         }
         remote_key = self._archive_key(epoch, snap_tick)
 
@@ -475,116 +489,99 @@ class SnapshotCycle:
         staging_dir: Path,
         in_progress_marker: Path,
     ) -> bool:
-        """Streaming path: tar | zstd | split directly into chunks."""
-        # Get chunk size from config
+        """Streaming path: pipe ``tar | zstd | split`` chunks straight into the
+        uploader so packaging and upload run concurrently. Each chunk is
+        retried and verified independently inside the uploader."""
         chunk_size_mb = self._config.scp_chunk_size_mb
         logger.info(
             f"Using streaming chunked compression "
-            f"(tar | zstd | split -b {chunk_size_mb}M)"
+            f"(tar | zstd | split -b {chunk_size_mb}M) with per-chunk upload"
         )
 
-        try:
-            chunk_files, total_uncompressed = await asyncio.to_thread(
-                self._state_manager.package_snapshot_chunked,
-                epoch,
-                staging_dir,
-                tick=snap_tick,
-                chunk_size_mb=chunk_size_mb,
-            )
-        except Exception as e:
-            logger.error(f"Failed to create chunked snapshot: {e}")
-            return False
-
-        if not chunk_files:
-            logger.error("No chunk files created")
-            return False
-
-        # Calculate total compressed size
-        compressed_size = sum(c.stat().st_size for c in chunk_files)
-
         now = datetime.now(timezone.utc).isoformat()
-        metadata = {
+        base_metadata = {
             "epoch": epoch,
             "tick": snap_tick,
             "timestamp": now,
-            "checksum": "",  # Will be computed by uploader
-            "size_bytes": compressed_size,
-            "uncompressed_size_bytes": total_uncompressed,
             "node_id": self._node_id,
-            "chunks": len(chunk_files),
         }
 
-        # Use the archive key helper (uses config extension)
-        remote_key = self._archive_key(epoch, snap_tick)
-
-        # Mark upload as in-progress
         try:
             in_progress_marker.touch()
         except OSError:
             pass
 
+        chunk_stream = self._state_manager.package_snapshot_chunked_stream(
+            epoch,
+            staging_dir,
+            tick=snap_tick,
+            chunk_size_mb=chunk_size_mb,
+        )
+
+        total_uncompressed = 0
+
+        async def _sized_stream():
+            nonlocal total_uncompressed
+            async for chunk_path, uncompressed in chunk_stream:
+                total_uncompressed = uncompressed
+                yield chunk_path
+
         try:
-            upload_ok = await self._upload_chunks_with_retries(
-                chunk_files, metadata, remote_key, total_uncompressed
-            )
+            try:
+                result = await self._uploader.upload_chunks(
+                    _sized_stream(), base_metadata, total_uncompressed
+                )
+            except Exception as e:
+                logger.error(
+                    f"Chunked upload pipeline failed: {e}", exc_info=True
+                )
+                result = None
+
+            upload_ok = result is not None and result.success
 
             if upload_ok:
-                # Update checksum in metadata from uploader
-                await self._publish_metadata(epoch, snap_tick, metadata)
-            else:
-                await self._alert_manager.send_alert(
-                    "error",
-                    "snapshot_upload_failed",
-                    {"epoch": epoch, "tick": snap_tick},
-                )
-        finally:
-            # Remove in-progress marker
-            try:
-                in_progress_marker.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-        # Cleanup chunk files after successful upload
-        if upload_ok:
-            for chunk_path in chunk_files:
-                try:
-                    if chunk_path.exists():
-                        chunk_path.unlink()
-                except OSError:
-                    pass
-
-        return upload_ok
-
-    async def _upload_chunks_with_retries(
-        self,
-        chunk_files: list[Path],
-        metadata: dict,
-        remote_key: str,
-        total_uncompressed: int,
-    ) -> bool:
-        """Upload chunks with retry logic."""
-        for attempt in range(self._config.upload_retry_count + 1):
-            result = await self._uploader.upload_chunks(
-                chunk_files, metadata, remote_key, total_uncompressed
-            )
-            if result.success:
                 logger.info(
                     f"Chunked upload successful: {result.remote_url} "
                     f"({result.bytes_uploaded} bytes, "
                     f"{result.duration_seconds:.1f}s)"
                 )
-                return True
-
-            logger.warning(
-                f"Chunked upload attempt {attempt + 1} failed: "
-                f"{result.error_message}"
-            )
-            if attempt < self._config.upload_retry_count:
-                await asyncio.sleep(
-                    self._config.upload_retry_delay_seconds
+                chunk_metadata = {
+                    **base_metadata,
+                    "format": SNAPSHOT_FORMAT_CHUNKED,
+                    "format_version": SNAPSHOT_FORMAT_VERSION,
+                    "dir": f"snap-t{snap_tick}",
+                    "size_bytes": result.bytes_uploaded,
+                    "uncompressed_size_bytes": total_uncompressed,
+                    "chunks": result.chunks,
+                }
+                await self._publish_chunked_metadata(
+                    epoch, snap_tick, chunk_metadata
                 )
+            else:
+                err = result.error_message if result else "pipeline error"
+                logger.error(f"Chunked upload failed: {err}")
+                await self._alert_manager.send_alert(
+                    "error",
+                    "snapshot_upload_failed",
+                    {"epoch": epoch, "tick": snap_tick, "error": err},
+                )
+        finally:
+            try:
+                in_progress_marker.unlink(missing_ok=True)
+            except OSError:
+                pass
+            # Sweep any chunk files the uploader didn't get around to deleting
+            # (e.g. on failure). Streaming uploader removes successful ones as
+            # it goes.
+            for leftover in staging_dir.glob(
+                f"ep{epoch}-t{snap_tick}-snap.tar.zst.*"
+            ):
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
 
-        return False
+        return upload_ok
 
     async def _rsync_upload_path(
         self, epoch: int, snap_tick: int
@@ -621,6 +618,8 @@ class SnapshotCycle:
                 "checksum": checksum,
                 "size_bytes": size_bytes,
                 "node_id": self._node_id,
+                "format": SNAPSHOT_FORMAT_SINGLE,
+                "format_version": SNAPSHOT_FORMAT_VERSION,
             }
             await self._publish_metadata(epoch, snap_tick, metadata)
         else:
@@ -635,20 +634,17 @@ class SnapshotCycle:
     async def _publish_metadata(
         self, epoch: int, snap_tick: int, metadata: dict
     ) -> None:
-        """Upload sidecar JSON, update index, and send alert."""
-        # Determine file extension from compression format
+        """Single-file snapshot: upload sidecar JSON, update index, send alert."""
         ext = "tar.zst" if self._config.package_compression == "tar.zst" else "zip"
 
-        # Sidecar JSON
         sidecar_key = self._sidecar_key(epoch, snap_tick)
         sidecar_content = json.dumps(metadata, indent=2).encode()
-        await self._uploader.put_small_file(
-            sidecar_key, sidecar_content
-        )
+        await self._uploader.put_small_file(sidecar_key, sidecar_content)
 
-        # Update index
         index_key = self._index_key(epoch)
         index_data = {
+            "format": SNAPSHOT_FORMAT_SINGLE,
+            "format_version": SNAPSHOT_FORMAT_VERSION,
             "epoch": epoch,
             "tick": snap_tick,
             "file": f"ep{epoch}-t{snap_tick}-snap.{ext}",
@@ -656,6 +652,41 @@ class SnapshotCycle:
             "timestamp": metadata["timestamp"],
             "checksum": metadata.get("checksum", ""),
             "size_bytes": metadata.get("size_bytes", 0),
+        }
+        await self._uploader.put_small_file(
+            index_key,
+            json.dumps(index_data, indent=2).encode(),
+        )
+
+        self._last_snapshot_epoch = epoch
+        await self._alert_manager.send_alert(
+            "info",
+            "snapshot_uploaded",
+            metadata,
+        )
+
+    async def _publish_chunked_metadata(
+        self, epoch: int, snap_tick: int, metadata: dict
+    ) -> None:
+        """Chunked snapshot: sidecar lists chunks, index points at the folder."""
+        sidecar_key = self._sidecar_key(epoch, snap_tick)
+        sidecar_content = json.dumps(metadata, indent=2).encode()
+        await self._uploader.put_small_file(sidecar_key, sidecar_content)
+
+        index_key = self._index_key(epoch)
+        index_data = {
+            "format": SNAPSHOT_FORMAT_CHUNKED,
+            "format_version": SNAPSHOT_FORMAT_VERSION,
+            "epoch": epoch,
+            "tick": snap_tick,
+            "dir": metadata["dir"],
+            "sidecar": f"ep{epoch}-t{snap_tick}-snap.json",
+            "timestamp": metadata["timestamp"],
+            "size_bytes": metadata.get("size_bytes", 0),
+            "uncompressed_size_bytes": metadata.get(
+                "uncompressed_size_bytes", 0
+            ),
+            "chunks": metadata["chunks"],
         }
         await self._uploader.put_small_file(
             index_key,
@@ -733,14 +764,18 @@ class SnapshotCycle:
     # Remote snapshot cleanup
     # ------------------------------------------------------------------
     async def _cleanup_old_snapshots(self) -> None:
-        """Remove old snapshots from remote, keeping only the N most recent."""
+        """Remove old snapshots from remote, keeping only the N most recent.
+
+        Recognises both the new chunked layout (snap-t{tick}/ folders) and
+        legacy single-file snapshots (.tar.zst / .zip).
+        """
         keep = self._config.snapshot_keep_count
         if keep <= 0:
-            return  # cleanup disabled
+            return
 
-        # Collect all snapshots across all epoch directories
-        # Store (epoch, tick, extension) tuples
-        all_snapshots: list[tuple[int, int, str]] = []
+        # (epoch, tick, kind, payload) where kind is "dir" or "file" and
+        # payload is either the folder name or the file extension.
+        all_snapshots: list[tuple[int, int, str, str]] = []
 
         try:
             entries = await self._uploader.list_remote_dir("")
@@ -748,7 +783,6 @@ class SnapshotCycle:
             logger.debug(f"Cannot list remote root for cleanup: {e}")
             return
 
-        # Filter to numeric epoch directory names
         epoch_nums: list[int] = []
         for name in entries:
             try:
@@ -756,42 +790,65 @@ class SnapshotCycle:
             except ValueError:
                 continue
 
-        # For each epoch directory, find snapshot archives
         for ep in epoch_nums:
             try:
-                files = await self._uploader.list_remote_dir(str(ep))
+                items = await self._uploader.list_remote_dir(str(ep))
             except Exception:
                 continue
 
-            for fname in files:
-                m = _SNAPSHOT_RE.match(fname)
-                if m:
-                    # group(1)=epoch, group(2)=tick, group(3)=extension
+            for name in items:
+                dir_match = _SNAPSHOT_DIR_RE.match(name)
+                if dir_match:
                     all_snapshots.append(
-                        (int(m.group(1)), int(m.group(2)), m.group(3))
+                        (ep, int(dir_match.group(1)), "dir", name)
+                    )
+                    continue
+                file_match = _SNAPSHOT_FILE_RE.match(name)
+                if file_match:
+                    all_snapshots.append(
+                        (ep, int(file_match.group(2)), "file", file_match.group(3))
                     )
 
         if len(all_snapshots) <= keep:
-            return  # nothing to clean up
+            return
 
-        # Sort by (epoch, tick) descending — most recent first
+        # Most recent first. Collapse duplicates per (epoch, tick) so a single
+        # snapshot with both a folder and a legacy file counts once toward `keep`.
         all_snapshots.sort(key=lambda x: (x[0], x[1]), reverse=True)
-        to_keep = set((s[0], s[1]) for s in all_snapshots[:keep])
-        to_delete = all_snapshots[keep:]
+        seen: set[tuple[int, int]] = set()
+        to_keep: set[tuple[int, int]] = set()
+        to_delete: list[tuple[int, int, str, str]] = []
+        for item in all_snapshots:
+            key = (item[0], item[1])
+            if key in seen:
+                # Duplicate (e.g. snap-t{tick}/ + legacy tar.zst): if the kept
+                # set already includes this snapshot, keep extras; otherwise delete.
+                if key in to_keep:
+                    continue
+                to_delete.append(item)
+                continue
+            seen.add(key)
+            if len(to_keep) < keep:
+                to_keep.add(key)
+            else:
+                to_delete.append(item)
 
-        kept_epochs = {s[0] for s in to_keep}
+        kept_epochs = {k[0] for k in to_keep}
         deleted_count = 0
 
-        for epoch, tick, ext in to_delete:
-            archive_key = f"{epoch}/ep{epoch}-t{tick}-snap.{ext}"
+        for epoch, tick, kind, payload in to_delete:
             sidecar_key = f"{epoch}/ep{epoch}-t{tick}-snap.json"
-            logger.info(f"Deleting old snapshot: {archive_key}")
-            await self._uploader.delete_file(archive_key)
+            if kind == "dir":
+                dir_key = f"{epoch}/{payload}"
+                logger.info(f"Deleting old snapshot folder: {dir_key}")
+                await self._uploader.delete_remote_dir(dir_key)
+            else:
+                archive_key = f"{epoch}/ep{epoch}-t{tick}-snap.{payload}"
+                logger.info(f"Deleting old snapshot archive: {archive_key}")
+                await self._uploader.delete_file(archive_key)
             await self._uploader.delete_file(sidecar_key)
             deleted_count += 1
 
-        # Clean up index/lock files from epochs with no remaining snapshots
-        # (but preserve the epoch directory and any non-snapshot files)
         removed_epochs = {s[0] for s in to_delete} - kept_epochs
         for epoch in removed_epochs:
             logger.info(

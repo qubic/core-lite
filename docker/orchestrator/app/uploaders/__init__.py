@@ -23,6 +23,8 @@ def create_uploader(config: SourceConfig) -> BaseUploader:
             chunk_timeout=config.scp_chunk_timeout,
             parallel_chunks=config.scp_parallel_chunks,
             min_chunk_size_gb=config.scp_min_chunk_size_gb,
+            chunk_retry_count=config.upload_retry_count,
+            chunk_retry_delay=config.upload_retry_delay_seconds,
         )
     elif config.uploader_type == "rsync":
         from app.uploaders.rsync import RsyncUploader

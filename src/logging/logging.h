@@ -14,6 +14,8 @@
 #include "kangaroo_twelve.h"
 
 #include "platform/virtual_memory.h"
+
+#include <unordered_map>
 struct Peer;
 
 #define LOG_CONTRACTS (LOG_CONTRACT_ERROR_MESSAGES | LOG_CONTRACT_WARNING_MESSAGES | LOG_CONTRACT_INFO_MESSAGES | LOG_CONTRACT_DEBUG_MESSAGES)
@@ -546,7 +548,7 @@ public:
             if (offsetTick < MAX_NUMBER_OF_TICKS_PER_EPOCH && currentTxId < LOG_TX_PER_TICK)
             {
                 auto& startIndex = currentTickTxToId.fromLogId[currentTxId];
-                auto& length = currentTickTxToId.length[currentTxId];\
+                auto& length = currentTickTxToId.length[currentTxId];
                 logIdToTxIdMap[logId] = currentTxId;
                 if (startIndex == -1)
                 {
@@ -594,6 +596,8 @@ public:
         // 1. The deleted log id must be a log of invalid solution tx
         static void _commit()
         {
+            std::unordered_map<unsigned int, bool> txInfoBlobAdjusted;
+            txInfoBlobAdjusted.reserve(LOG_TX_PER_TICK);
             // commit the tmp blob info and logBuffer to the VM
             unsigned long long currentDeletedLogs = 0;
             unsigned long long totalBytesOfLogsDeleted = 0;
@@ -616,9 +620,13 @@ public:
                     *((unsigned long long*)(tmpLog + 10)) = i - currentDeletedLogs;
                     // append the log to the log buffer
                     logBuffer.appendMany(tmpLog, blobInfo.length);
-                    // adjust the txInfoBlob
-                    unsigned int txId = logIdToTxIdMap[i];
-                    currentTickTxToId.fromLogId[txId] -= currentDeletedLogs;
+                    // adjust the txInfoBlob (once per tx)
+                    if (txInfoBlobAdjusted.find(logIdToTxIdMap[i]) == txInfoBlobAdjusted.end())
+                    {
+                        unsigned int txId = logIdToTxIdMap[i];
+                        currentTickTxToId.fromLogId[txId] -= currentDeletedLogs;
+                        txInfoBlobAdjusted[txId] = true;
+                    }
                 }
             }
             // Reset the tmp buffer

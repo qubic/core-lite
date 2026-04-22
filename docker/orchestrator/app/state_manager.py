@@ -200,8 +200,20 @@ class StateManager:
     async def download_snapshot(
         self, snapshot_meta: SnapshotMeta
     ) -> bool:
-        """Download a snapshot archive (ZIP or tar.zst)."""
-        # Determine file extension from URL
+        """Download and extract a snapshot.
+
+        If ``snapshot_meta.chunks`` is populated we stream each chunk into
+        ``tar -I "zstd -T0"``; otherwise we fall back to the single-file
+        archive path.
+        """
+        if snapshot_meta.chunks:
+            try:
+                await self._download_and_extract_chunked(snapshot_meta)
+                return True
+            except Exception as e:
+                logger.error(f"Failed to download chunked snapshot: {e}")
+                return False
+
         url = snapshot_meta.url
         if url.endswith(".tar.zst") or ".tar.zst" in url:
             archive_path = self._data_dir / "snapshot.tar.zst"
@@ -218,6 +230,108 @@ class StateManager:
         finally:
             if archive_path.exists():
                 archive_path.unlink()
+
+    async def _download_and_extract_chunked(
+        self, snapshot_meta: SnapshotMeta
+    ) -> None:
+        """Download chunks one at a time and stream them into tar -I zstd -xf -.
+
+        Each chunk is written to disk briefly (to verify checksum) then piped
+        into tar stdin and deleted. Peak extra disk usage is one chunk.
+        """
+        import asyncio
+        import subprocess
+        import time
+
+        tmp_dir = self._data_dir / ".snap-chunks"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+
+        total_size = sum(c.size for c in snapshot_meta.chunks)
+        logger.info(
+            f"Downloading chunked snapshot: {len(snapshot_meta.chunks)} chunks, "
+            f"{total_size / (1024**3):.2f} GB"
+        )
+        start = time.monotonic()
+
+        proc = await asyncio.create_subprocess_exec(
+            "tar", "-I", "zstd -T0",
+            "-xf", "-",
+            "-C", str(self._data_dir),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assert proc.stdin is not None
+
+        downloaded_bytes = 0
+        try:
+            for i, chunk_info in enumerate(snapshot_meta.chunks):
+                tmp_path = tmp_dir / chunk_info.filename
+                logger.info(
+                    f"Downloading chunk {i + 1}/{len(snapshot_meta.chunks)}: "
+                    f"{chunk_info.filename} "
+                    f"({chunk_info.size / (1024**2):.0f} MB)"
+                )
+                await self._downloader.download(chunk_info.url, tmp_path)
+
+                actual_size = tmp_path.stat().st_size
+                if chunk_info.size and actual_size != chunk_info.size:
+                    raise RuntimeError(
+                        f"chunk {chunk_info.filename} size mismatch: "
+                        f"expected {chunk_info.size}, got {actual_size}"
+                    )
+                if chunk_info.checksum:
+                    actual_sum = await asyncio.to_thread(
+                        self.compute_checksum, tmp_path
+                    )
+                    if actual_sum != chunk_info.checksum:
+                        raise RuntimeError(
+                            f"chunk {chunk_info.filename} checksum mismatch"
+                        )
+
+                with open(tmp_path, "rb") as f:
+                    while True:
+                        buf = f.read(_CHUNK_SIZE)
+                        if not buf:
+                            break
+                        proc.stdin.write(buf)
+                        await proc.stdin.drain()
+                tmp_path.unlink()
+
+                downloaded_bytes += actual_size
+                elapsed = time.monotonic() - start
+                speed = (downloaded_bytes / elapsed) / (1024 * 1024) if elapsed > 0 else 0
+                logger.info(
+                    f"  chunk {i + 1}/{len(snapshot_meta.chunks)} done "
+                    f"({downloaded_bytes / (1024**3):.2f}/{total_size / (1024**3):.2f} GB, "
+                    f"{speed:.1f} MB/s)"
+                )
+
+            proc.stdin.close()
+            await proc.wait()
+            if proc.returncode != 0:
+                stderr = (await proc.stderr.read()).decode().strip()
+                raise RuntimeError(
+                    f"tar extraction failed (exit {proc.returncode}): {stderr}"
+                )
+        except BaseException:
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+            raise
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        duration = time.monotonic() - start
+        logger.info(
+            f"Chunked snapshot extracted: {downloaded_bytes / (1024**3):.2f} GB "
+            f"in {duration:.0f}s"
+        )
+
+        self._rename_extracted_files(snapshot_meta.epoch)
 
     def _extract_archive(self, archive_path: Path, epoch: int) -> None:
         """Extract archive (auto-detect ZIP or tar.zst) and rename files."""
@@ -710,6 +824,127 @@ class StateManager:
             f"{ratio:.1f}x compression, {duration:.0f}s)"
         )
         return archive_path
+
+    async def package_snapshot_chunked_stream(
+        self,
+        epoch: int,
+        dest: Path,
+        tick: int,
+        chunk_size_mb: int = 2048,
+    ):
+        """Package files as tar.zst chunks, yielding each chunk as it is finalised.
+
+        Yields tuples of ``(chunk_path, total_uncompressed_size)`` (the second
+        value is the same for every chunk — the uncompressed size known from
+        listing files).
+
+        Uses the same ``tar | zstd | split`` pipeline as
+        :meth:`package_snapshot_chunked` but monitors the staging directory so
+        chunks can be handed off to an uploader the moment they are complete.
+        A chunk is considered finalised when the next-indexed chunk appears
+        (split fills sequentially); the highest-indexed chunk is finalised
+        when ``split`` exits.
+        """
+        import asyncio
+        import time
+
+        files = self.list_snapshot_files(epoch)
+        if not files:
+            raise FileNotFoundError(
+                f"No state files found for epoch {epoch}"
+            )
+
+        file_args = []
+        total_size = 0
+        for f in files:
+            rel_path = f.relative_to(self._data_dir)
+            file_args.append(str(rel_path))
+            try:
+                total_size += f.stat().st_size
+            except OSError:
+                pass
+
+        base_name = f"ep{epoch}-t{tick}-snap.tar.zst."
+        chunk_prefix = dest / base_name
+        filelist_path = dest / f".filelist-t{tick}.txt"
+        filelist_path.write_text("\n".join(file_args))
+
+        logger.info(
+            f"Streaming chunked tar.zst: {len(files)} files, "
+            f"{total_size / (1024**3):.1f} GB -> {chunk_size_mb}MB chunks"
+        )
+        start_time = time.monotonic()
+
+        # Run the whole pipeline inside a single bash process. asyncio's
+        # create_subprocess_exec can't chain stdin/stdout between asyncio
+        # subprocesses (StreamReader has no fileno), so we let the shell
+        # build the pipe. pipefail ensures bash's exit code reflects a
+        # failure in any stage, not just the last one.
+        import shlex
+        pipeline = (
+            f"tar -cf - -C {shlex.quote(str(self._data_dir))} "
+            f"-T {shlex.quote(str(filelist_path))} "
+            f"| zstd -T0 - "
+            f"| split -b {chunk_size_mb}M -d -a 2 - "
+            f"{shlex.quote(str(chunk_prefix))}"
+        )
+        proc = await asyncio.create_subprocess_exec(
+            "bash", "-o", "pipefail", "-c", pipeline,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        emitted: set[str] = set()
+        try:
+            while True:
+                existing = sorted(
+                    p for p in dest.glob(f"{base_name}*")
+                    if p.name not in emitted
+                )
+                if proc.returncode is not None:
+                    for p in existing:
+                        emitted.add(p.name)
+                        yield p, total_size
+                    break
+
+                # Pipeline still running: every chunk except the highest-index
+                # one is complete (split fills sequentially).
+                if len(existing) >= 2:
+                    for p in existing[:-1]:
+                        emitted.add(p.name)
+                        yield p, total_size
+                await asyncio.sleep(0.5)
+
+            # Reap the process and surface errors.
+            await proc.wait()
+            if proc.returncode != 0:
+                stderr = (await proc.stderr.read()).decode().strip()
+                raise RuntimeError(
+                    f"packaging pipeline failed (exit {proc.returncode}): "
+                    f"{stderr}"
+                )
+        except BaseException:
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await proc.wait()
+                except Exception:
+                    pass
+            raise
+        finally:
+            try:
+                filelist_path.unlink()
+            except OSError:
+                pass
+
+        duration = time.monotonic() - start_time
+        logger.info(
+            f"Streaming packaging complete: {len(emitted)} chunks "
+            f"in {duration:.0f}s"
+        )
 
     def package_snapshot_chunked(
         self,

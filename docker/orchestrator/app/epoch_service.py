@@ -6,7 +6,7 @@ from typing import Optional
 
 import aiohttp
 
-from app.models import EpochInfo, SnapshotMeta
+from app.models import EpochInfo, SnapshotChunkInfo, SnapshotMeta
 
 logger = logging.getLogger(__name__)
 
@@ -90,61 +90,75 @@ class EpochService:
     async def get_latest_snapshot_meta(
         self, epoch: int
     ) -> Optional[SnapshotMeta]:
-        """Check snapshot service for the latest available snapshot.
+        """Fetch ``ep{epoch}-latest-snap.json`` and return a SnapshotMeta.
 
-        Tries the index-based naming first
-        (``ep{epoch}-latest-snap.json``), then falls back to a direct
-        HEAD check on ``ep{epoch}-full.zip``.
+        Supports two formats:
+
+        * ``chunked-tar-zst`` — the index has a ``dir`` and ``chunks`` list.
+          ``SnapshotMeta.url`` is the chunk directory URL, and
+          ``SnapshotMeta.chunks`` is populated with one entry per chunk.
+        * ``single-file`` — the index has a ``file`` field. ``SnapshotMeta.url``
+          is the archive URL and ``SnapshotMeta.chunks`` is empty.
         """
         session = await self._get_session()
 
-        # --- New naming: check ep{epoch}-latest-snap.json index ----------
         index_url = (
             f"{self._snapshot_service_url}/network/{epoch}/"
             f"ep{epoch}-latest-snap.json"
         )
         try:
             async with session.get(index_url) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    tick = data.get("tick", 0)
-                    filename = data.get(
-                        "file", f"ep{epoch}-t{tick}-snap.zip"
+                if resp.status != 200:
+                    logger.debug(
+                        f"No snapshot index for epoch {epoch} "
+                        f"(HTTP {resp.status})"
                     )
-                    snap_url = (
-                        f"{self._snapshot_service_url}/network/"
-                        f"{epoch}/{filename}"
-                    )
-                    return SnapshotMeta(
-                        epoch=data.get("epoch", epoch),
-                        tick=tick,
-                        timestamp=data.get("timestamp", ""),
-                        url=snap_url,
-                        checksum=data.get("checksum", ""),
-                        size_bytes=data.get("size_bytes", 0),
-                    )
-        except (aiohttp.ClientError, KeyError, TimeoutError) as e:
+                    return None
+                data = await resp.json()
+        except (aiohttp.ClientError, TimeoutError) as e:
             logger.debug(f"Index lookup failed for epoch {epoch}: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"Unexpected index parse error for epoch {epoch}: {e}")
+            return None
 
-        # --- Legacy: direct HEAD on ep{epoch}-full.zip --------------------
-        zip_url = (
-            f"{self._snapshot_service_url}/network/{epoch}/ep{epoch}-full.zip"
+        fmt = data.get("format", "single-file")
+        tick = data.get("tick", 0)
+        epoch_from_index = data.get("epoch", epoch)
+        epoch_base_url = f"{self._snapshot_service_url}/network/{epoch_from_index}"
+
+        if fmt == "chunked-tar-zst":
+            dir_name = data.get("dir") or f"snap-t{tick}"
+            chunks_raw = data.get("chunks") or []
+            chunks = [
+                SnapshotChunkInfo(
+                    filename=c["filename"],
+                    size=int(c.get("size", 0)),
+                    checksum=c.get("checksum", ""),
+                    url=f"{epoch_base_url}/{dir_name}/{c['filename']}",
+                )
+                for c in chunks_raw
+            ]
+            return SnapshotMeta(
+                epoch=epoch_from_index,
+                tick=tick,
+                timestamp=data.get("timestamp", ""),
+                url=f"{epoch_base_url}/{dir_name}",
+                checksum="",
+                size_bytes=data.get("size_bytes", 0),
+                chunks=chunks,
+            )
+
+        # single-file format
+        filename = data.get("file") or f"ep{epoch_from_index}-t{tick}-snap.tar.zst"
+        return SnapshotMeta(
+            epoch=epoch_from_index,
+            tick=tick,
+            timestamp=data.get("timestamp", ""),
+            url=f"{epoch_base_url}/{filename}",
+            checksum=data.get("checksum", ""),
+            size_bytes=data.get("size_bytes", 0),
         )
-        try:
-            async with session.head(zip_url) as resp:
-                if resp.status == 200:
-                    size = int(resp.headers.get("Content-Length", 0))
-                    return SnapshotMeta(
-                        epoch=epoch,
-                        tick=0,
-                        timestamp="",
-                        url=zip_url,
-                        size_bytes=size,
-                    )
-        except (aiohttp.ClientError, TimeoutError):
-            pass
-
-        return None
 
     async def check_snapshot_available(self, epoch: int) -> bool:
         meta = await self.get_latest_snapshot_meta(epoch)

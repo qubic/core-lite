@@ -55,13 +55,23 @@ class EpochInfo:
 
 
 @dataclass
+class SnapshotChunkInfo:
+    """One chunk of a chunked snapshot on the remote server."""
+    filename: str
+    size: int
+    checksum: str  # sha256 hex
+    url: str       # absolute URL for this chunk
+
+
+@dataclass
 class SnapshotMeta:
     epoch: int
     tick: int
     timestamp: str
-    url: str
+    url: str                 # URL of the chunk directory (no trailing slash)
     checksum: str = ""
     size_bytes: int = 0
+    chunks: list[SnapshotChunkInfo] = field(default_factory=list)
 
 
 @dataclass
@@ -82,3 +92,7 @@ class UploadResult:
     error_message: Optional[str] = None
     bytes_uploaded: int = 0
     duration_seconds: float = 0.0
+    # For chunked uploads: the remote folder holding the chunks and a list of
+    # chunk descriptors (filename/size/checksum). Empty for non-chunked uploads.
+    remote_dir: Optional[str] = None
+    chunks: list[dict] = field(default_factory=list)

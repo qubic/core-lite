@@ -82,7 +82,7 @@ class SourceConfig(BaseModel):
     scp_key_file: str = ""
 
     # Chunked upload settings (for large files)
-    scp_chunk_size_mb: int = 2048        # Split into 2048MB chunks
+    scp_chunk_size_mb: int = 512         # Split into 512MB chunks
     scp_chunk_timeout: int = 600        # 10 min timeout per chunk
     scp_parallel_chunks: int = 2        # Upload 2 chunks in parallel
     scp_min_chunk_size_gb: int = 2      # Only chunk files > 2GB

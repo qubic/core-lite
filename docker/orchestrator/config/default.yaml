@@ -65,7 +65,7 @@ source:
   scp_dest_path: "/snapshots"
   scp_key_file: "/qubic/.ssh/id_ed25519"
   # Chunked upload settings (for large files > 2GB)
-  scp_chunk_size_mb: 2048           # Split into 2GB chunks
+  scp_chunk_size_mb: 512            # Split into 512MB chunks
   scp_chunk_timeout: 600            # 10 min timeout per chunk
   scp_parallel_chunks: 2            # Upload 2 chunks in parallel
   scp_min_chunk_size_gb: 2          # Only chunk files > 2GB

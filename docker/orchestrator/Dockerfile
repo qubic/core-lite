@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
     libc++-dev \
     libc++abi-dev \
     libjsoncpp-dev \
+    libhiredis-dev \
     uuid-dev \
     zlib1g-dev \
     libssl-dev \
@@ -56,6 +57,7 @@ RUN apt-get update && apt-get install -y \
     libc++1 \
     libc++abi1 \
     libjsoncpp25 \
+    libhiredis1.1.0 \
     libssl3 \
     openssh-client \
     rsync \

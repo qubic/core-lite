@@ -1409,7 +1409,7 @@ static const unsigned char oracleMachineIPs[][4] = {
      {127, 0, 0, 1}, // REMOVE THIS ENTRY AND REPLACE IT WITH YOUR OWN IP ADDRESSES
 };
 
-#define ENABLE_QUBIC_LOGGING_EVENT 0 // turn on logging events
+#define ENABLE_QUBIC_LOGGING_EVENT 1 // turn on logging events
 
 #ifdef NO_ENABLE_QUBIC_LOGGING_EVENT
 #undef ENABLE_QUBIC_LOGGING_EVENT

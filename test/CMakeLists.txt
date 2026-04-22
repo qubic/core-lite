@@ -54,7 +54,10 @@ add_executable(
    		contract_rl.cpp
    		contract_testex.cpp
 		contract_escrow.cpp
-   		custom_mining.cpp
+		contract_quottery.cpp
+		contract_qrwa.cpp
+		contract_qip.cpp
+		contract_qusino.cpp
 		custom_qubic_mining_storage.cpp
    		file_io.cpp
    		# fourq.cpp
