@@ -3308,6 +3308,22 @@ static void processTick(unsigned long long processorNumber)
         unsigned int nContractTx = 0;
         unsigned int nOtherTx = 0;
         const m256i& tickLeaderKey = broadcastedComputors.computors.publicKeys[system.tick % NUMBER_OF_COMPUTORS];
+
+        // Backup the spectrum data first
+        for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
+        {
+            if (!isZero(nextTickData.transactionDigests[transactionIndex]))
+            {
+                if (tsCurrentTickTransactionOffsets[transactionIndex])
+                {
+                    Transaction* transaction = ts.tickTransactions(tsCurrentTickTransactionOffsets[transactionIndex]);
+                    // Store spectrum data for rollback if there is invalid solutions in the tick
+                    auto sourceSpectrumIndex = ::spectrumIndex(transaction->sourcePublicKey);
+                    spectrumDataRollback[transactionIndex] = spectrum[sourceSpectrumIndex];
+                }
+            }
+        }
+
         for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
         {
             if (!isZero(nextTickData.transactionDigests[transactionIndex]))
@@ -3321,9 +3337,7 @@ static void processTick(unsigned long long processorNumber)
                     {
                         isThereQearnTx = true;
                     }
-                    // Store spectrum data for rollback if there is invalid solutions in the tick
-                    auto sourceSpectrumIndex = ::spectrumIndex(transaction->sourcePublicKey);
-                    spectrumDataRollback[transactionIndex] = spectrum[sourceSpectrumIndex];
+
                     processTickTransaction(transaction, transactionIndex, tsCurrentTickTransactionOffsets[transactionIndex], processorNumber);
 
                     if (transaction->sourcePublicKey == tickLeaderKey)
