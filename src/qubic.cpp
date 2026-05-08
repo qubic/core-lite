@@ -5635,18 +5635,21 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
                         if (spectrum[spectrumIndex].latestIncomingTransferTick != spectrumDataRollback[transactionIndex].latestIncomingTransferTick)
                         {
                             latestIncomingTransferTickPreserveSpectrumIndexes.push_back(spectrumIndex);
-                            printf("tx index %d has correct sol", transactionIndex);
+                            printf("tx index %d has correct sol \n", transactionIndex  );
                         } else
                         {
-                            printf("tx index %d has wrong sol", transactionIndex);
+                            printf("tx index %d has wrong sol \n", transactionIndex);
                         }
                         RELEASE(spectrumLock);
                     } else
                     {
                         // standard tx always change dest latestIncomingTransferTick
                         const int destSpectrumIndex = ::spectrumIndex(transaction->destinationPublicKey);
-                        latestIncomingTransferTickPreserveSpectrumIndexes.push_back(destSpectrumIndex);
-                        printf("pushed tx index %d | spec index %d to preserve list, because it's a standard tx", transactionIndex, destSpectrumIndex);
+                        if (destSpectrumIndex >= 0)
+                        {
+                            latestIncomingTransferTickPreserveSpectrumIndexes.push_back(destSpectrumIndex);
+                            printf("pushed tx index %d | spec index %d to preserve list, because it's a standard tx \n", transactionIndex, destSpectrumIndex);
+                        }
                     }
                 }
             }
