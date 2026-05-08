@@ -5597,6 +5597,9 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
 
     solutionTotalExecutionTicks = __rdtsc() - solutionProcessStartTick; // for tracking the time processing solutions
 
+    std::vector<int> latestIncomingTransferTickPreserveSpectrumIndexes;
+    latestIncomingTransferTickPreserveSpectrumIndexes.reserve(32);
+
     ts.tickData.acquireLock();
     for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
     {
@@ -5626,6 +5629,18 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
 
                         // Then, process the transaction again
                         processTickTransactionSolution((MiningSolutionTransaction*)transaction, transactionIndex, processorNumber, true);
+
+                        // if the latestIncomingTransferTick after != previous (correct sol) -> we need to preserve latestIncomingTransferTick to avoid later incorrect sol reset it.
+                        ACQUIRE(spectrumLock);
+                        if (spectrum[spectrumIndex].latestIncomingTransferTick != spectrumDataRollback[transactionIndex].latestIncomingTransferTick)
+                        {
+                            latestIncomingTransferTickPreserveSpectrumIndexes.push_back(spectrumIndex);
+                        }
+                        RELEASE(spectrumLock);
+                    } else
+                    {
+                        // standard tx always change latestIncomingTransferTick
+                        latestIncomingTransferTickPreserveSpectrumIndexes.push_back(spectrumIndex);
                     }
                 }
             }
@@ -5639,6 +5654,14 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
             }
         }
     }
+
+    for (int spectrumIndex : latestIncomingTransferTickPreserveSpectrumIndexes)
+    {
+        ACQUIRE(spectrumLock);
+        spectrum[spectrumIndex].latestIncomingTransferTick = system.tick;
+        RELEASE(spectrumLock);
+    }
+
     ts.tickData.releaseLock();
     isReprocessingSolutions = false;
 }
