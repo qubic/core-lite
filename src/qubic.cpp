@@ -43,8 +43,6 @@
 #define system qsystem
 #endif
 
-// #define OLD_QTRY
-
 //#define INCLUDE_CONTRACT_TEST_EXAMPLES
 
 // contract_def.h needs to be included first to make sure that contracts have minimal access
@@ -127,6 +125,7 @@
 #include "contract_core/qpi_oracle_impl.h"
 
 #include "contract_core/qpi_mining_impl.h"
+#include "extensions/core_utils.h"
 #include "revenue.h"
 
 #include <csignal>
@@ -142,7 +141,9 @@ static bool loadAllNodeStateFromFile = false;
 static volatile int shutDownNode = 0;
 static volatile char enableBadBoySpammer = 0;
 static volatile bool spammerWithRpc = false;
+static volatile bool isReprocessingSolutions = false;
 
+#include "extensions/global_data.h"
 #include "extensions/cxxopts.h"
 #include "extensions/overload.h"
 #include "extensions/k12_engine.h"
@@ -543,10 +544,11 @@ static void getComputerDigest(m256i& digest)
                 _interlockedadd64(&contractTotalExecutionTime[digestIndex], executionTime);
                 // do not charge contract 0 state digest computation,
                 // only charge execution time if contract is already constructed/not in IPO
-                if (digestIndex > 0 && system.epoch >= contractDescriptions[digestIndex].constructionEpoch)
-                {
-                    executionTimeAccumulator.addTime(digestIndex, executionTime);
-                }
+                // TODO: enable this after adding proper tracking of contract state writes
+                //if (digestIndex > 0 && system.epoch >= contractDescriptions[digestIndex].constructionEpoch)
+                //{
+                //    executionTimeAccumulator.addTime(digestIndex, executionTime);
+                //}
 
                 // Gather data for comparing different versions of K12
                 if (K12MeasurementsCount < 500)
@@ -819,7 +821,7 @@ static void processBroadcastComputors(Peer* peer, RequestResponseHeader* header)
             {
                 ACQUIRE(minerScoreArrayLock);
                 numberOfOwnComputorIndices = 0;
-                for (unsigned int i = 0; i < NUMBER_0F_COMPUT0RS; i++)
+                for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
                 {
                     minerPublicKeys[i] = request->computors.publicKeys[i];
 
@@ -903,12 +905,16 @@ static void processBroadcastTick(Peer* peer, RequestResponseHeader* header)
                 // Copy the sent tick to the tick storage
                 copyMem(tsTick, &request->tick, sizeof(Tick));
                 peer->lastActiveTick = max(peer->lastActiveTick, peer->getDejavuTick(header->dejavu()));
+                peer->peerReportedTick = max(peer->peerReportedTick, request->tick.tick);
             }
 
             ts.ticks.releaseLock(request->tick.computorIndex);
         }
     }
 }
+
+#include "optimizations/opt_config.h"
+#include "optimizations/opt_eager_tx_fetch.h"
 
 static void processBroadcastFutureTickData(Peer* peer, RequestResponseHeader* header)
 {
@@ -988,6 +994,7 @@ static void processBroadcastFutureTickData(Peer* peer, RequestResponseHeader* he
                             {
                                 copyMem(&td, &request->tickData, sizeof(TickData));
                                 peer->lastActiveTick = max(peer->lastActiveTick, peer->getDejavuTick(header->dejavu()));
+                                peer->peerReportedTick = max(peer->peerReportedTick, request->tickData.tick);
 
                                 if (memcmp(&td, &request->tickData, sizeof(TickData)) != 0)
                                 {
@@ -997,6 +1004,12 @@ static void processBroadcastFutureTickData(Peer* peer, RequestResponseHeader* he
                                         bs->Stall(1'000'000);
                                     }
                                 }
+
+#if USE_EAGER_TX_FETCH
+                                ts.tickData.releaseLock();
+                                eagerFetchMissingTransactions(request->tickData);
+                                ts.tickData.acquireLock();
+#endif
                             }
                         }
                     }
@@ -1026,6 +1039,13 @@ static void processBroadcastFutureTickData(Peer* peer, RequestResponseHeader* he
                         {
                             copyMem(&td, &request->tickData, sizeof(TickData));
                             peer->lastActiveTick = max(peer->lastActiveTick, peer->getDejavuTick(header->dejavu()));
+                            peer->peerReportedTick = max(peer->peerReportedTick, request->tickData.tick);
+
+#if USE_EAGER_TX_FETCH
+                            ts.tickData.releaseLock();
+                            eagerFetchMissingTransactions(request->tickData);
+                            ts.tickData.acquireLock();
+#endif
                         }
                     }
                 }
@@ -1105,9 +1125,12 @@ static void processBroadcastTransaction(Peer* peer, RequestResponseHeader* heade
                 const int spectrumIdx = spectrumIndex(request->sourcePublicKey);
                 if (spectrumIdx >= 0 && energy(spectrumIdx) >= MiningSolutionTransaction::minAmount())
                 {
-                    const m256i& solutionMiningSeed = *(m256i*)request->inputPtr();
-                    const m256i& solutionNonce = *(m256i*)(request->inputPtr() + 32);
-                    (*score)(processorNumber, request->sourcePublicKey, solutionMiningSeed, solutionNonce);
+                    if (isMainMode() || forceVerifySolutions)
+                    {
+                        const m256i& solutionMiningSeed = *(m256i*)request->inputPtr();
+                        const m256i& solutionNonce = *(m256i*)(request->inputPtr() + 32);
+                        (*score)(processorNumber, request->sourcePublicKey, solutionMiningSeed, solutionNonce);
+                    }
                 }
             }
 
@@ -1525,10 +1548,8 @@ static void processBroadcastCustomMiningTask(RequestResponseHeader* header)
     if (verify(dogeDispatcherPubkey, digest.m256i_u8, payload + (messageSize - SIGNATURE_SIZE)))
     {
         enqueueResponse(NULL, header);
-#if BASIC_DOGE_ORACLE_QUERIES
         customQubicMiningStorage.addTask(reinterpret_cast<const CustomQubicMiningTask*>(payload), messageSize - SIGNATURE_SIZE);
         ATOMIC_INC64(gDogeMiningStats.phaseV2.tasks);
-#endif
     }
 }
 
@@ -1559,7 +1580,6 @@ static void processBroadcastCustomMiningSolution(RequestResponseHeader* header)
         // Broadcast the solution to peers.
         enqueueResponse(NULL, header);
 
-#if BASIC_DOGE_ORACLE_QUERIES
         if (sol->customMiningType == CustomMiningType::DOGE)
         {
             if (messageSize - SIGNATURE_SIZE < sizeof(CustomQubicMiningSolution) + sizeof(QubicDogeMiningSolution))
@@ -1614,9 +1634,7 @@ static void processBroadcastCustomMiningSolution(RequestResponseHeader* header)
                     queryData->numMerkleBranches = task.numMerkleBranches;
                     copyMem(queryData->additionalData, task.additionalData, OI::DogeShareValidation::OracleQuery::additionalDataSize);
 
-#if RETRY_DOGE_ORACLE_QUERIES
-                    customQubicMiningStorage.addOracleQuery(tx);
-#endif
+                    customQubicMiningStorage.addOracleQuery(tx, task.jobId);
 
                     if (isMainMode()) // only main node should send oracle queries
                     {
@@ -1629,7 +1647,6 @@ static void processBroadcastCustomMiningSolution(RequestResponseHeader* header)
                 }
             }
         }
-#endif
     }
 }
 
@@ -1973,8 +1990,8 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
             _InterlockedDecrement(&epochTransitionWaitingRequestProcessors);
         }
 
-        // try to compute a solution if any is queued and this thread is assigned to compute solution
-        if (solutionProcessorFlags[processorNumber])
+        // try to compute a solution if any is queued and this thread is assigned to compute solution EXCEPT for last processor
+        if (solutionProcessorFlags[processorNumber] && processorNumber != (numberOfProcessors - 1))
         {
             PROFILE_NAMED_SCOPE("requestProcessor(): solution processing");
             score->tryProcessSolution(processorNumber);
@@ -2795,10 +2812,12 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
     const m256i& transactionDigest = nextTickData.transactionDigests[transactionIndex];
     const m256i& dataLock = nextTickData.timelock;
 
+#ifdef TESTNET
     // Record the tx with digest
-    // ts.transactionsDigestAccess.acquireLock();
-    // ts.transactionsDigestAccess.insertTransaction(transactionDigest, txOffset);
-    // ts.transactionsDigestAccess.releaseLock();
+    ts.transactionsDigestAccess.acquireLock();
+    ts.transactionsDigestAccess.insertTransaction(transactionDigest, txOffset);
+    ts.transactionsDigestAccess.releaseLock();
+#endif
 
 #if !defined(NDEBUG)
     if (isZero(transaction->destinationPublicKey))
@@ -2919,7 +2938,6 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
                     int64_t queryId = oracleEngine.startUserQuery(queryTx, transactionIndex, forceZeroFee);
                     const bool error = queryId < 0;
 
-#if RETRY_DOGE_ORACLE_QUERIES
                     if (queryTx->oracleInterfaceIndex == OI::DogeShareValidation::oracleInterfaceIndex)
                     {
                         if (error)
@@ -2932,7 +2950,6 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
                             customQubicMiningStorage.markOracleQueryStarted((const OracleUserQueryTransactionPrefix*)transaction, queryId);
                         }
                     }
-#endif
 
                     if (error && transaction->amount)
                     {
@@ -3249,6 +3266,8 @@ static void processTick(unsigned long long processorNumber)
     WAIT_WHILE(contractProcessorState);
     PROFILE_SCOPE_END();
 
+    latestIncomingTransferTickPreserveSpectrumIndexes.clear();
+
     bool isThereQearnTx = false;
     unsigned int tickIndex = ts.tickToIndexCurrentEpoch(system.tick);
     ts.tickData.acquireLock();
@@ -3327,6 +3346,29 @@ static void processTick(unsigned long long processorNumber)
         unsigned int nContractTx = 0;
         unsigned int nOtherTx = 0;
         const m256i& tickLeaderKey = broadcastedComputors.computors.publicKeys[system.tick % NUMBER_OF_COMPUTORS];
+
+        bool isThisTickHasSolution = false;
+
+        // Backup the spectrum data first
+        for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
+        {
+            if (!isZero(nextTickData.transactionDigests[transactionIndex]))
+            {
+                if (tsCurrentTickTransactionOffsets[transactionIndex])
+                {
+                    Transaction* transaction = ts.tickTransactions(tsCurrentTickTransactionOffsets[transactionIndex]);
+                    // Store spectrum data for rollback if there is invalid solutions in the tick
+                    auto sourceSpectrumIndex = ::spectrumIndex(transaction->sourcePublicKey);
+                    spectrumDataRollback[transactionIndex] = spectrum[sourceSpectrumIndex];
+
+                    if (MiningSolutionTransaction::isSolutionTransaction(transaction))
+                    {
+                        isThisTickHasSolution = true;
+                    }
+                }
+            }
+        }
+
         for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
         {
             if (!isZero(nextTickData.transactionDigests[transactionIndex]))
@@ -3340,10 +3382,40 @@ static void processTick(unsigned long long processorNumber)
                     {
                         isThereQearnTx = true;
                     }
-                    // Store spectrum data for rollback if there is invalid solutions in the tick
-                    auto sourceSpectrumIndex = ::spectrumIndex(transaction->sourcePublicKey);
-                    spectrumDataRollback[transactionIndex] = spectrum[sourceSpectrumIndex];
+
+                    // TODO: optimize it
+                    unsigned int computorLastIncommingTransferTickMap[NUMBER_OF_COMPUTORS] = {0};
+
+                    if (!MiningSolutionTransaction::isSolutionTransaction(transaction) && isThisTickHasSolution)
+                    {
+                        forEachComputorId([&computorLastIncommingTransferTickMap](const m256i &id, int index)
+                        {
+                            auto spectrumIndex = ::spectrumIndex(id);
+                            if (spectrumIndex >= 0 && !isZero(id))
+                            {
+                                auto& entityRecord = spectrum[spectrumIndex];
+                                computorLastIncommingTransferTickMap[index] = entityRecord.latestIncomingTransferTick;
+                            }
+                        });
+                    }
+
                     processTickTransaction(transaction, transactionIndex, tsCurrentTickTransactionOffsets[transactionIndex], processorNumber);
+
+                    if (!MiningSolutionTransaction::isSolutionTransaction(transaction) && isThisTickHasSolution)
+                    {
+                        forEachComputorId([&computorLastIncommingTransferTickMap](const m256i &id, int index)
+                        {
+                            auto spectrumIndex = ::spectrumIndex(id);
+                            if (spectrumIndex >= 0 && !isZero(id))
+                            {
+                                auto& entityRecord = spectrum[spectrumIndex];
+                                if (entityRecord.latestIncomingTransferTick != computorLastIncommingTransferTickMap[index])
+                                {
+                                    latestIncomingTransferTickPreserveSpectrumIndexes.insert(spectrumIndex);
+                                }
+                            }
+                        });
+                    }
 
                     if (transaction->sourcePublicKey == tickLeaderKey)
                     {
@@ -3395,12 +3467,20 @@ static void processTick(unsigned long long processorNumber)
         logToConsole(message);
     }
 
-#if RETRY_DOGE_ORACLE_QUERIES
-    // Resend oracle queries for share validation if they were scheduled for but not included in this tick.
+    // Resend own oracle queries for share validation if they were scheduled for but not included in this tick.
     int currentQueryIndex = customQubicMiningStorage.getNextScheduledQueryIndexForTick(CustomMiningType::DOGE, /*currentQueryIndex=*/-1, system.tick);
     while (currentQueryIndex >= 0)
     {
         CustomQubicMiningStorage::OracleQueryInfo queryInfo = customQubicMiningStorage.getOracleQueryInfo(CustomMiningType::DOGE, currentQueryIndex);
+
+        // Check if task is still active before rescheduling (revenue points can only be counted for active tasks).
+        if (!customQubicMiningStorage.containsTask(CustomMiningType::DOGE, queryInfo.taskId))
+        {
+            customQubicMiningStorage.removeOracleQuery(CustomMiningType::DOGE, currentQueryIndex);
+            currentQueryIndex = customQubicMiningStorage.getNextScheduledQueryIndexForTick(CustomMiningType::DOGE, currentQueryIndex, system.tick);
+            continue;
+        }
+
         for (unsigned int i = 0; i < computorSeedsCount; ++i)
         {
             if (computorPublicKeys[i] == queryInfo.sourcePublicKey)
@@ -3439,7 +3519,6 @@ static void processTick(unsigned long long processorNumber)
         }
         currentQueryIndex = customQubicMiningStorage.getNextScheduledQueryIndexForTick(CustomMiningType::DOGE, currentQueryIndex, system.tick);
     }
-#endif
 
     // Generate subscription queries (may create queries that immediately timeout if the network was stuck)
     oracleEngine.generateSubscriptionQueries();
@@ -3489,10 +3568,8 @@ static void processTick(unsigned long long processorNumber)
                 if (finishedUserQuery->status == ORACLE_QUERY_STATUS_SUCCESS
                     && oracleEngine.getOracleReply(finishedUserQuery->queryId, &reply, sizeof(reply)))
                 {
-#if RETRY_DOGE_ORACLE_QUERIES
                     // Oracle query was successful, remove from storage.
                     customQubicMiningStorage.removeOracleQuery(finishedUserQuery->interfaceIndex, finishedUserQuery->queryId);
-#endif
 
                     // Oracle reply is available
                     if (reply.isValid)
@@ -3525,7 +3602,6 @@ static void processTick(unsigned long long processorNumber)
                         ATOMIC_INC64(gDogeMiningStats.phaseV2.invalid);
                     }
                 }
-#if RETRY_DOGE_ORACLE_QUERIES
                 else
                 {
                     // Oracle query failed -> resend user query tx if it is from own comp pool
@@ -3557,7 +3633,6 @@ static void processTick(unsigned long long processorNumber)
                         }
                     }
                 }
-#endif
             }
         }
         finishedUserQuery = oracleEngine.getFinishedUserQuery();
@@ -4880,6 +4955,9 @@ static void updateFutureTickCount()
 // 2: not enough votes to decide
 static int findCurrentDigestsFromNextTickVotes(m256i &spectrumDigest, unsigned int &resourceTestingDigest)
 {
+    static std::unordered_map<unsigned int, int> resourceTestingDigestQuorumCountMap;
+    resourceTestingDigestQuorumCountMap.clear();
+
     const unsigned int nextTick = system.tick + 1;
     const unsigned int nextTickIndex = ts.tickToIndexCurrentEpoch(nextTick);
     const Tick* tsCompTicks = ts.ticks.getByTickIndex(nextTickIndex);
@@ -4926,10 +5004,10 @@ static int findCurrentDigestsFromNextTickVotes(m256i &spectrumDigest, unsigned i
             if (tsCompTicks[i].prevSpectrumDigest == spectrumDigest)
             {
                 resourceTestingDigest = tsCompTicks[i].prevResourceTestingDigest;
-                break;
+                resourceTestingDigestQuorumCountMap[resourceTestingDigest]++;
             }
         }
-        return 1;
+        goto pickAndReturnOk;
     } else
     {
         if (isZero(targetNextTickDataDigest) && uniqueCurrentSpectrumDigestCounters[mostPopularUniqueCurrentSpectrumDigestIndex] > NUMBER_OF_COMPUTORS - QUORUM)
@@ -4940,10 +5018,10 @@ static int findCurrentDigestsFromNextTickVotes(m256i &spectrumDigest, unsigned i
                 if (tsCompTicks[i].prevSpectrumDigest == spectrumDigest)
                 {
                     resourceTestingDigest = tsCompTicks[i].prevResourceTestingDigest;
-                    break;
+                    resourceTestingDigestQuorumCountMap[resourceTestingDigest]++;
                 }
             }
-            return 1;
+            goto pickAndReturnOk;
         }
 
         if (totalUniqueCurrentSpectrumDigestCounter < NUMBER_OF_COMPUTORS)
@@ -4958,6 +5036,28 @@ static int findCurrentDigestsFromNextTickVotes(m256i &spectrumDigest, unsigned i
 
         return 0;
     }
+
+pickAndReturnOk:
+    // pick the most popular resourceTestingDigest among the votes that have the same prevSpectrumDigest
+    int mostPopularResourceTestingDigest = 0;
+    int mostPopularResourceTestingDigestQuorumCount = 0;
+    for (const auto &pair : resourceTestingDigestQuorumCountMap)
+    {
+        if (pair.second > mostPopularResourceTestingDigestQuorumCount)
+        {
+            mostPopularResourceTestingDigest = pair.first;
+            mostPopularResourceTestingDigestQuorumCount = pair.second;
+        }
+    }
+    resourceTestingDigest = mostPopularResourceTestingDigest;
+
+    // mostPopularResourceTestingDigestQuorumCount must >= QUORUM
+    if (mostPopularResourceTestingDigestQuorumCount < QUORUM)
+    {
+        return 2;
+    }
+
+    return 1;
 }
 
 
@@ -5539,6 +5639,14 @@ static bool isTickTimeOut()
 
 void reprocessSolutionTransaction(unsigned long long processorNumber)
 {
+    isReprocessingSolutions = true;
+
+    TickData currentTickData;
+    // copy system.tick data
+    ts.tickData.acquireLock();
+    copyMem(&currentTickData, ts.tickData.getByTickIfNotEmpty(system.tick), sizeof(TickData));
+    ts.tickData.releaseLock();
+
     // first rollback the miner scores data
     copyMem((void*)minerPublicKeys, (void*)minerPublicKeysRollback, sizeof(minerPublicKeysRollback));
     copyMem((void*)minerScores, (void*)minerScoresRollback, sizeof(minerScoresRollback));
@@ -5551,7 +5659,7 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
     // pre-scan any solution tx and add them to solution task queue
     for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
     {
-        if (!isZero(nextTickData.transactionDigests[transactionIndex]))
+        if (!isZero(currentTickData.transactionDigests[transactionIndex]))
         {
             if (tsCurrentTickTransactionOffsets[transactionIndex])
             {
@@ -5597,10 +5705,9 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
     solutionTotalExecutionTicks = __rdtsc() - solutionProcessStartTick; // for tracking the time processing solutions
 
     ts.tickData.acquireLock();
-    TickData *currentTickData = ts.tickData.getByTickIfNotEmpty(system.tick);
     for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
     {
-        if (!isZero(currentTickData->transactionDigests[transactionIndex]))
+        if (!isZero(currentTickData.transactionDigests[transactionIndex]))
         {
             if (tsCurrentTickTransactionOffsets[transactionIndex])
             {
@@ -5626,6 +5733,14 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
 
                         // Then, process the transaction again
                         processTickTransactionSolution((MiningSolutionTransaction*)transaction, transactionIndex, processorNumber, true);
+
+                        // if the latestIncomingTransferTick after != previous (correct sol) -> we need to preserve latestIncomingTransferTick to avoid later incorrect sol reset it.
+                        ACQUIRE(spectrumLock);
+                        if (spectrum[spectrumIndex].latestIncomingTransferTick != spectrumDataRollback[transactionIndex].latestIncomingTransferTick)
+                        {
+                            latestIncomingTransferTickPreserveSpectrumIndexes.insert(spectrumIndex);
+                        }
+                        RELEASE(spectrumLock);
                     }
                 }
             }
@@ -5639,7 +5754,16 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
             }
         }
     }
+
+    ACQUIRE(spectrumLock);
+    for (const int spectrumIndex : latestIncomingTransferTickPreserveSpectrumIndexes)
+    {
+        spectrum[spectrumIndex].latestIncomingTransferTick = system.tick;
+    }
+    RELEASE(spectrumLock);
+
     ts.tickData.releaseLock();
+    isReprocessingSolutions = false;
 }
 
 void checkAllContractLocksReleased()
@@ -8164,6 +8288,8 @@ static void processKeyPresses()
     }
 }
 
+#include "optimizations/opt_future_tick_prefetch.h"
+
 EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 {
     ih = imageHandle;
@@ -8235,7 +8361,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
             preprocessSolutionFlags[i] = false;
         }
 
-        for (unsigned int i = 0; i < numberOfAllProcessors && numberOfProcessors < MAX_NUMBER_OF_PROCESSORS_DYNAMIC; i++)
+        for (unsigned int i = 0; i < numberOfAllProcessors && numberOfProcessors < MAX_NUMBER_OF_PROCESSORS; i++)
         {
             EFI_PROCESSOR_INFORMATION processorInformation;
             mpServicesProtocol->GetProcessorInfo(mpServicesProtocol, i, &processorInformation);
@@ -8279,10 +8405,10 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     createEvent(EVT_NOTIFY_SIGNAL, TPL_CALLBACK, (void*)&shutdownCallback, NULL, &processors[numberOfProcessors].event);
                     mpServicesProtocol->StartupThisAP(mpServicesProtocol, Processor::runFunction, i, processors[numberOfProcessors].event, 0, &processors[numberOfProcessors], NULL);
 
-                    if (!solutionProcessorFlags[i % NUMBER_OF_SOLUTION_PROCESSORS_DYNAMIC]
+                    if (!solutionProcessorFlags[i % NUMBER_OF_SOLUTION_PROCESSORS]
                         && !solutionProcessorFlags[i])
                     {
-                        solutionProcessorFlags[i % NUMBER_OF_SOLUTION_PROCESSORS_DYNAMIC] = true;
+                        solutionProcessorFlags[i % NUMBER_OF_SOLUTION_PROCESSORS] = true;
                         solutionProcessorFlags[i] = true;
                         if (nSolutionProcessorIDs < NUMBER_OF_PREPROCESS_SOLUTION_PROCESSORS)
                         {
@@ -8586,6 +8712,11 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                         pushToAnyFullNode(&requestedQuorumTick.header);
                     }
                     futureTickRequestingIndicator = gFutureTickTotalNumberOfComputors;
+
+#if USE_FUTURE_TICK_PREFETCH
+                    const unsigned int prefetchDepth = opt_future_tick_prefetch::computePrefetchDepth();
+#endif
+
                     ts.tickData.acquireLock();
                     if ((ts.tickData[system.tick + 1 - system.initialTick].epoch != system.epoch
                         || targetNextTickDataDigestIsKnown)
@@ -8609,6 +8740,16 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     }
                     ts.tickData.releaseLock();
 
+#if USE_FUTURE_TICK_PREFETCH
+                    if (prefetchDepth > 2)
+                    {
+                        // Prefetch tickData for ticks +3..+prefetchDepth (lock acquired internally)
+                        opt_future_tick_prefetch::requestFutureTickData(prefetchDepth);
+                        // Prefetch quorum tick (votes) for ticks +2..+prefetchDepth
+                        opt_future_tick_prefetch::requestFutureQuorumTicks(prefetchDepth);
+                    }
+#endif
+
                     if (requestedTickTransactions.requestedTickTransactions.tick)
                     {
                         requestedTickTransactions.header.randomizeDejavu();
@@ -8617,6 +8758,11 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
 
                         requestedTickTransactions.requestedTickTransactions.tick = 0;
                     }
+
+#if USE_FUTURE_TICK_PREFETCH
+                    // Prefetch all transactions for future ticks that already have tickData
+                    opt_future_tick_prefetch::requestFutureTickTransactions(prefetchDepth);
+#endif
                 }
 
                 // Add messages from response queue to sending buffer
@@ -8782,7 +8928,16 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                             // state persisting for at least a second -> also log to debug.log
                             misalignedState = 2;
                         }
-                        logToConsole(L"MISALIGNED STATE DETECTED");
+                        if (!isReprocessingSolutions)
+                        {
+                            logToConsole(L"MISALIGNED STATE DETECTED");
+                        } else
+                        {
+                            setText(message, L"REPROCESSING SOLUTIONS - STATE IS NOT FINALIZED YET | Solutions in queue: ");
+                            appendNumber(message, score->_nTask - score->_nFinished, TRUE);
+                            appendText(message, L".");
+                            logToConsole(message);
+                        }
                         if (misalignedState == 2)
                         {
                             // print health status and stop repeated logging to debug.log
@@ -8912,7 +9067,7 @@ unsigned long long getTotalRam()
     }
 
     // processor buffers
-    totalRam += MAX_NUMBER_OF_PROCESSORS_DYNAMIC * (BUFFER_SIZE + STACK_SIZE);
+    totalRam += MAX_NUMBER_OF_PROCESSORS * (BUFFER_SIZE + STACK_SIZE);
 
     // tick storage
     totalRam += ts.getTickDataSize();

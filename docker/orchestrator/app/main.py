@@ -157,7 +157,11 @@ class Orchestrator:
         )
 
         downloader = create_downloader(self._config.downloader)
-        self._state_manager = StateManager(self._data_dir, downloader)
+        self._state_manager = StateManager(
+            self._data_dir,
+            downloader,
+            download_concurrency=self._config.downloader.snapshot_download_concurrency,
+        )
 
         self._process_manager = ProcessManager(
             binary_path=Path(self._config.binary_path),

@@ -114,6 +114,7 @@ class DownloaderConfig(BaseModel):
     timeout_seconds: int = 3600
     retry_count: int = 5
     retry_delay_seconds: int = 60
+    snapshot_download_concurrency: int = 3
 
     # S3 downloader
     s3_bucket: str = ""

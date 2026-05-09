@@ -14,16 +14,13 @@
 #define MAX_NUMBER_OF_PROCESSORS 6
 #define NUMBER_OF_SOLUTION_PROCESSORS 2
 #else
-#define MAX_NUMBER_OF_PROCESSORS 8
-#define NUMBER_OF_SOLUTION_PROCESSORS 2
+#define MAX_NUMBER_OF_PROCESSORS 32
+#define NUMBER_OF_SOLUTION_PROCESSORS (MAX_NUMBER_OF_PROCESSORS - 4)
 #endif
 
 // Maximum number of NUMBER_OF_PREPROCESS_SOLUTION_PROCESSORS can be used for pre-process the mining solution.
 // Must not exceed half of NUMBER_OF_SOLUTION_PROCESSORS. Set 0 to disable.
-#define NUMBER_OF_PREPROCESS_SOLUTION_PROCESSORS 0
-
-inline unsigned int MAX_NUMBER_OF_PROCESSORS_DYNAMIC = MAX_NUMBER_OF_PROCESSORS;
-inline unsigned int NUMBER_OF_SOLUTION_PROCESSORS_DYNAMIC = NUMBER_OF_SOLUTION_PROCESSORS;
+#define NUMBER_OF_PREPROCESS_SOLUTION_PROCESSORS (NUMBER_OF_SOLUTION_PROCESSORS / 2)
 
 // Number of buffers available for executing contract functions in parallel; having more means reserving a bit more RAM (+1 = +32 MB)
 // and less waiting in request processors if there are more parallel contract function requests. The maximum value that may make sense
@@ -92,12 +89,12 @@ static_assert(AUTO_FORCE_NEXT_TICK_THRESHOLD* TARGET_TICK_DURATION >= PEER_REFRE
 // Config options that should NOT be changed by operators
 
 #define VERSION_A 1
-#define VERSION_B 288
+#define VERSION_B 290
 #define VERSION_C 1
 
 // Epoch and initial tick for node startup
-#define EPOCH 210
-#define TICK 50005000
+#define EPOCH 212
+#define TICK 51430000
 #define TICK_IS_FIRST_TICK_OF_EPOCH 1 // Set to 0 if the network is restarted during the EPOCH with a new initial TICK
 
 #define ARBITRATOR "AFZPUAIYVPNUYGJRQVLUKOPPVLHAZQTGLYAAUUNBXFTVTAMSBKQBLEIEPCVJ"

@@ -97,6 +97,7 @@ struct Peer
     unsigned int trackRequestedTick[dejavuListSize];
     long trackRequestedCounter; // "long" to discard warning from intrin.h
     unsigned int lastActiveTick; // indicate the tick number that this peer transfer valid tick/vote data
+    unsigned int peerReportedTick; // highest tick number received from this peer (votes/tickData), used for network-tip / catch-up detection
 
     bool isFullNode() const
     {
@@ -153,6 +154,7 @@ struct Peer
 
         dataToTransmitSize = 0;
         lastActiveTick = 0;
+        peerReportedTick = 0;
         trackRequestedCounter = 0;
         setMem(trackRequestedTick, sizeof(trackRequestedTick), 0);
         setMem(trackRequestedDejavu, sizeof(trackRequestedDejavu), 0);

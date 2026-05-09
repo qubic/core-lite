@@ -130,9 +130,16 @@ SNAPSHOT_DIR_FILES = [
 class StateManager:
     """Manages local state files for the Qubic node."""
 
-    def __init__(self, data_dir: Path, downloader: BaseDownloader) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        downloader: BaseDownloader,
+        *,
+        download_concurrency: int = 3,
+    ) -> None:
         self._data_dir = data_dir
         self._downloader = downloader
+        self._download_concurrency = max(1, download_concurrency)
 
     @property
     def data_dir(self) -> Path:
@@ -188,7 +195,7 @@ class StateManager:
         zip_path = self._data_dir / "epoch_files.zip"
         try:
             await self._downloader.download(url, zip_path)
-            self._extract_and_rename(zip_path, epoch)
+            self._extract_archive(zip_path, epoch)
             return True
         except Exception as e:
             logger.error(f"Failed to download epoch files: {e}")
@@ -203,7 +210,7 @@ class StateManager:
         """Download and extract a snapshot.
 
         If ``snapshot_meta.chunks`` is populated we stream each chunk into
-        ``tar -I "zstd -T0"``; otherwise we fall back to the single-file
+        ``tar -I "pzstd"``; otherwise we fall back to the single-file
         archive path.
         """
         if snapshot_meta.chunks:
@@ -234,10 +241,13 @@ class StateManager:
     async def _download_and_extract_chunked(
         self, snapshot_meta: SnapshotMeta
     ) -> None:
-        """Download chunks one at a time and stream them into tar -I zstd -xf -.
+        """Download chunks in parallel and stream them in order into tar -I pzstd -xf -.
 
-        Each chunk is written to disk briefly (to verify checksum) then piped
-        into tar stdin and deleted. Peak extra disk usage is one chunk.
+        Up to ``self._download_concurrency`` chunks are downloaded and verified
+        in parallel; a single consumer pipes them into tar stdin in chunk order
+        (chunks are concatenated frames of one tar.zst stream — order matters).
+        The semaphore is released only after a chunk is consumed and deleted,
+        so peak disk usage is bounded to ``self._download_concurrency`` chunks.
         """
         import asyncio
         import subprocess
@@ -247,14 +257,17 @@ class StateManager:
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
         total_size = sum(c.size for c in snapshot_meta.chunks)
+        n_chunks = len(snapshot_meta.chunks)
+        concurrency = min(self._download_concurrency, n_chunks) if n_chunks else 1
         logger.info(
-            f"Downloading chunked snapshot: {len(snapshot_meta.chunks)} chunks, "
-            f"{total_size / (1024**3):.2f} GB"
+            f"Downloading chunked snapshot: {n_chunks} chunks, "
+            f"{total_size / (1024**3):.2f} GB "
+            f"(parallel={concurrency})"
         )
         start = time.monotonic()
 
         proc = await asyncio.create_subprocess_exec(
-            "tar", "-I", "zstd -T0",
+            "tar", "-I", "pzstd",
             "-xf", "-",
             "-C", str(self._data_dir),
             stdin=asyncio.subprocess.PIPE,
@@ -263,16 +276,31 @@ class StateManager:
         )
         assert proc.stdin is not None
 
-        downloaded_bytes = 0
-        try:
-            for i, chunk_info in enumerate(snapshot_meta.chunks):
+        sem = asyncio.Semaphore(concurrency)
+
+        # Aggregate download stats (shared across concurrent fetch_chunk tasks).
+        # Per-chunk wall time alone reports per-stream throughput, which is
+        # confusing under parallelism (3 streams at 4 MB/s each = 12 MB/s
+        # actually flowing). We compute aggregate as bytes-downloaded /
+        # wall-time-since-first-download.
+        dl_bytes_total = 0  # cumulative bytes downloaded across all streams
+        dl_phase_start: float | None = None  # set on first download start
+
+        async def fetch_chunk(idx: int, chunk_info) -> tuple[Path, int, float]:
+            nonlocal dl_bytes_total, dl_phase_start
+            await sem.acquire()
+            try:
                 tmp_path = tmp_dir / chunk_info.filename
                 logger.info(
-                    f"Downloading chunk {i + 1}/{len(snapshot_meta.chunks)}: "
+                    f"Downloading chunk {idx + 1}/{n_chunks}: "
                     f"{chunk_info.filename} "
                     f"({chunk_info.size / (1024**2):.0f} MB)"
                 )
+                if dl_phase_start is None:
+                    dl_phase_start = time.monotonic()
+                dl_start = time.monotonic()
                 await self._downloader.download(chunk_info.url, tmp_path)
+                dl_secs = time.monotonic() - dl_start
 
                 actual_size = tmp_path.stat().st_size
                 if chunk_info.size and actual_size != chunk_info.size:
@@ -288,23 +316,62 @@ class StateManager:
                         raise RuntimeError(
                             f"chunk {chunk_info.filename} checksum mismatch"
                         )
+                dl_bytes_total += actual_size
+                return tmp_path, actual_size, dl_secs
+            except BaseException:
+                # Consumer won't release the slot for a chunk that never made it.
+                sem.release()
+                raise
 
-                with open(tmp_path, "rb") as f:
-                    while True:
-                        buf = f.read(_CHUNK_SIZE)
-                        if not buf:
-                            break
-                        proc.stdin.write(buf)
-                        await proc.stdin.drain()
-                tmp_path.unlink()
+        tasks = [
+            asyncio.create_task(fetch_chunk(i, c))
+            for i, c in enumerate(snapshot_meta.chunks)
+        ]
+
+        downloaded_bytes = 0
+        sum_dl_secs = 0.0
+        sum_extract_secs = 0.0
+        try:
+            for i, task in enumerate(tasks):
+                tmp_path, actual_size, dl_secs = await task
+                extract_start = time.monotonic()
+                try:
+                    with open(tmp_path, "rb") as f:
+                        while True:
+                            buf = f.read(_CHUNK_SIZE)
+                            if not buf:
+                                break
+                            proc.stdin.write(buf)
+                            await proc.stdin.drain()
+                finally:
+                    try:
+                        tmp_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    sem.release()
+                extract_secs = time.monotonic() - extract_start
 
                 downloaded_bytes += actual_size
-                elapsed = time.monotonic() - start
-                speed = (downloaded_bytes / elapsed) / (1024 * 1024) if elapsed > 0 else 0
+                sum_dl_secs += dl_secs
+                sum_extract_secs += extract_secs
+
+                size_mb = actual_size / (1024 * 1024)
+                # Aggregate download rate: total bytes finished downloading
+                # across all streams / wall time since first download started.
+                dl_elapsed = (
+                    time.monotonic() - dl_phase_start
+                    if dl_phase_start is not None else 0.0
+                )
+                dl_aggregate = (
+                    (dl_bytes_total / (1024 * 1024)) / dl_elapsed
+                    if dl_elapsed > 0 else 0.0
+                )
+                ex_speed = size_mb / extract_secs if extract_secs > 0 else 0
                 logger.info(
-                    f"  chunk {i + 1}/{len(snapshot_meta.chunks)} done "
+                    f"  chunk {i + 1}/{n_chunks} done "
                     f"({downloaded_bytes / (1024**3):.2f}/{total_size / (1024**3):.2f} GB, "
-                    f"{speed:.1f} MB/s)"
+                    f"download {dl_aggregate:.1f} MB/s aggregate, "
+                    f"extract {ex_speed:.1f} MB/s)"
                 )
 
             proc.stdin.close()
@@ -315,6 +382,10 @@ class StateManager:
                     f"tar extraction failed (exit {proc.returncode}): {stderr}"
                 )
         except BaseException:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             if proc.returncode is None:
                 try:
                     proc.kill()
@@ -326,9 +397,16 @@ class StateManager:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
         duration = time.monotonic() - start
+        size_mb = downloaded_bytes / (1024 * 1024)
+        avg_dl = size_mb / sum_dl_secs if sum_dl_secs > 0 else 0
+        avg_extract = size_mb / sum_extract_secs if sum_extract_secs > 0 else 0
+        overall = size_mb / duration if duration > 0 else 0
         logger.info(
             f"Chunked snapshot extracted: {downloaded_bytes / (1024**3):.2f} GB "
-            f"in {duration:.0f}s"
+            f"in {duration:.0f}s "
+            f"(per-stream download {avg_dl:.1f} MB/s, "
+            f"extract {avg_extract:.1f} MB/s, "
+            f"overall {overall:.1f} MB/s)"
         )
 
         self._rename_extracted_files(snapshot_meta.epoch)
@@ -341,7 +419,7 @@ class StateManager:
             self._extract_zip(archive_path, epoch)
 
     def _extract_tar_zst(self, archive_path: Path, epoch: int) -> None:
-        """Extract tar.zst archive using system tar+zstd."""
+        """Extract tar.zst archive using system tar+pzstd."""
         import subprocess
         import time
 
@@ -350,7 +428,7 @@ class StateManager:
 
         cmd = [
             "tar",
-            "-I", "zstd -T0",  # Multi-threaded decompression
+            "-I", "pzstd",  # parallel zstd; output is standard .zst
             "-xf", str(archive_path),
             "-C", str(self._data_dir),
         ]
@@ -763,15 +841,16 @@ class StateManager:
             f"{total_size / (1024**3):.1f} GB to compress"
         )
 
-        # Use tar with zstd compression and verbose output
-        # -I "zstd -T0": use zstd with all CPU threads
+        # Use tar with pzstd compression and verbose output
+        # -I "pzstd": parallel zstd, defaults to nproc-1 threads,
+        #             output is standard .zst (readable by plain zstd)
         # -v: verbose (outputs each file name to stderr)
         # -c: create archive
         # -f: output file
         # -C: change to data_dir before adding files
         cmd = [
             "tar",
-            "-I", "zstd -T0",
+            "-I", "pzstd",
             "-vcf", str(archive_path),
             "-C", str(self._data_dir),
         ] + file_args
@@ -884,8 +963,8 @@ class StateManager:
         pipeline = (
             f"tar -cf - -C {shlex.quote(str(self._data_dir))} "
             f"-T {shlex.quote(str(filelist_path))} "
-            f"| zstd -T0 - "
-            f"| split -b {chunk_size_mb}M -d -a 2 - "
+            f"| pzstd "
+            f"| split -b {chunk_size_mb}M -d -a 4 - "
             f"{shlex.quote(str(chunk_prefix))}"
         )
         proc = await asyncio.create_subprocess_exec(
@@ -989,7 +1068,7 @@ class StateManager:
                 pass
 
         # Base name for chunks: ep199-t43669270-snap.tar.zst.
-        # split will append numeric suffixes: .00, .01, .02, etc.
+        # split will append numeric suffixes: .0000, .0001, .0002, etc.
         base_name = f"ep{epoch}-t{tick}-snap.tar.zst."
         chunk_prefix = dest / base_name
 
@@ -998,22 +1077,22 @@ class StateManager:
             f"{total_size / (1024**3):.1f} GB -> {chunk_size_mb}MB chunks"
         )
 
-        # Pipeline: tar | zstd | split
+        # Pipeline: tar | pzstd | split
         # tar -cf - : create archive to stdout
-        # zstd -T0  : compress with all threads, output to stdout
+        # pzstd     : parallel zstd, defaults to nproc-1 threads, stdout
         # split -b  : split into fixed-size chunks with numeric suffixes
         tar_cmd = [
             "tar", "-cf", "-",
             "-C", str(self._data_dir),
         ] + file_args
 
-        zstd_cmd = ["zstd", "-T0", "-"]
+        zstd_cmd = ["pzstd"]
 
         split_cmd = [
             "split",
             "-b", f"{chunk_size_mb}M",
-            "-d",  # numeric suffixes: 00, 01, 02
-            "-a", "2",  # 2-digit suffix
+            "-d",  # numeric suffixes: 0000, 0001, 0002
+            "-a", "4",  # 4-digit suffix -> 10000 chunks max (5 TB @ 512MB)
             "-",  # read from stdin
             str(chunk_prefix),  # output prefix
         ]

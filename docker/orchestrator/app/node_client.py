@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 import aiohttp
@@ -11,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_NODE_URL = "http://127.0.0.1:41841"
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10)
+SLOW_CALL_THRESHOLD_MS = 1000
 
 
 class NodeClient:
@@ -37,16 +39,47 @@ class NodeClient:
 
     async def get_tick_info(self) -> TickInfo:
         session = await self._get_session()
-        async with session.get(f"{self._base_url}/tick-info") as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-            return TickInfo.from_json(data)
+        start = time.monotonic()
+        try:
+            async with session.get(f"{self._base_url}/tick-info") as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+                elapsed_ms = (time.monotonic() - start) * 1000
+                if elapsed_ms >= SLOW_CALL_THRESHOLD_MS:
+                    logger.info(
+                        f"/tick-info slow: {elapsed_ms:.0f} ms "
+                        f"(tick={data.get('tick')}, status={resp.status})"
+                    )
+                return TickInfo.from_json(data)
+        except Exception as e:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            logger.warning(
+                f"/tick-info failed after {elapsed_ms:.0f} ms: "
+                f"{type(e).__name__}: {e}"
+            )
+            raise
 
     async def get_latest_stats(self) -> dict:
         session = await self._get_session()
-        async with session.get(f"{self._base_url}/v1/latest-stats") as resp:
-            resp.raise_for_status()
-            return await resp.json()
+        start = time.monotonic()
+        try:
+            async with session.get(f"{self._base_url}/v1/latest-stats") as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+                elapsed_ms = (time.monotonic() - start) * 1000
+                if elapsed_ms >= SLOW_CALL_THRESHOLD_MS:
+                    logger.info(
+                        f"/v1/latest-stats slow: {elapsed_ms:.0f} ms "
+                        f"(status={resp.status})"
+                    )
+                return data
+        except Exception as e:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            logger.warning(
+                f"/v1/latest-stats failed after {elapsed_ms:.0f} ms: "
+                f"{type(e).__name__}: {e}"
+            )
+            raise
 
     async def request_save_snapshot(self) -> bool:
         session = await self._get_session()

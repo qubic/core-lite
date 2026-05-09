@@ -144,15 +144,18 @@ class Watchdog:
         # 2. Try to get tick info
         try:
             tick_info = await self._node_client.get_tick_info()
-        except Exception:
+        except Exception as e:
+            # Do NOT transition to STUCK on API failures: a slow/blocked HTTP
+            # endpoint does not mean the node is unhealthy (the main loop may
+            # still be ticking).  Just log and keep the previous health state.
+            self._state.consecutive_stuck_polls += 1
+            logger.warning(
+                f"get_tick_info failed "
+                f"(consecutive={self._state.consecutive_stuck_polls}): "
+                f"{type(e).__name__}: {e}"
+            )
             if self._state.health == NodeHealth.STARTING:
                 return NodeHealth.STARTING
-            self._state.consecutive_stuck_polls += 1
-            if (
-                self._state.consecutive_stuck_polls
-                >= self._config.stuck_consecutive_polls
-            ):
-                return NodeHealth.STUCK
             return self._state.health
 
         # 3. Check if saving snapshot - do NOT interfere
