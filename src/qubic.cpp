@@ -3313,6 +3313,8 @@ static void processTick(unsigned long long processorNumber)
         unsigned int nOtherTx = 0;
         const m256i& tickLeaderKey = broadcastedComputors.computors.publicKeys[system.tick % NUMBER_OF_COMPUTORS];
 
+        bool isThisTickHasSolution = false;
+
         // Backup the spectrum data first
         for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
         {
@@ -3324,6 +3326,11 @@ static void processTick(unsigned long long processorNumber)
                     // Store spectrum data for rollback if there is invalid solutions in the tick
                     auto sourceSpectrumIndex = ::spectrumIndex(transaction->sourcePublicKey);
                     spectrumDataRollback[transactionIndex] = spectrum[sourceSpectrumIndex];
+
+                    if (MiningSolutionTransaction::isSolutionTransaction(transaction))
+                    {
+                        isThisTickHasSolution = true;
+                    }
                 }
             }
         }
@@ -3345,7 +3352,7 @@ static void processTick(unsigned long long processorNumber)
                     // TODO: optimize it
                     unsigned int computorLastIncommingTransferTickMap[NUMBER_OF_COMPUTORS] = {0};
 
-                    if (!MiningSolutionTransaction::isSolutionTransaction(transaction))
+                    if (!MiningSolutionTransaction::isSolutionTransaction(transaction) && isThisTickHasSolution)
                     {
                         forEachComputorId([&computorLastIncommingTransferTickMap](const m256i &id, int index)
                         {
@@ -3360,7 +3367,7 @@ static void processTick(unsigned long long processorNumber)
 
                     processTickTransaction(transaction, transactionIndex, tsCurrentTickTransactionOffsets[transactionIndex], processorNumber);
 
-                    if (!MiningSolutionTransaction::isSolutionTransaction(transaction))
+                    if (!MiningSolutionTransaction::isSolutionTransaction(transaction) && isThisTickHasSolution)
                     {
                         forEachComputorId([&computorLastIncommingTransferTickMap](const m256i &id, int index)
                         {
