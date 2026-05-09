@@ -5689,10 +5689,6 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
                         if (spectrum[spectrumIndex].latestIncomingTransferTick != spectrumDataRollback[transactionIndex].latestIncomingTransferTick)
                         {
                             latestIncomingTransferTickPreserveSpectrumIndexes.insert(spectrumIndex);
-                            printf("Preserve spectrum index %d latestIncomingTransferTick %u -> %u\n", spectrumIndex, spectrumDataRollback[transactionIndex].latestIncomingTransferTick, spectrum[spectrumIndex].latestIncomingTransferTick);
-                        } else
-                        {
-                            printf("[wrong sol] No need to preserve spectrum index %d latestIncomingTransferTick %u -> %u\n", spectrumIndex, spectrumDataRollback[transactionIndex].latestIncomingTransferTick, spectrum[spectrumIndex].latestIncomingTransferTick);
                         }
                         RELEASE(spectrumLock);
                     }
@@ -5713,7 +5709,6 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
     for (const int spectrumIndex : latestIncomingTransferTickPreserveSpectrumIndexes)
     {
         spectrum[spectrumIndex].latestIncomingTransferTick = system.tick;
-        printf("Preserved spectrum index %d latestIncomingTransferTick to current tick %u\n", spectrumIndex, system.tick);
     }
     RELEASE(spectrumLock);
 
