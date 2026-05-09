@@ -119,6 +119,7 @@
 #include "contract_core/qpi_oracle_impl.h"
 
 #include "contract_core/qpi_mining_impl.h"
+#include "extensions/core_utils.h"
 #include "revenue.h"
 
 #include <csignal>
@@ -135,6 +136,7 @@ static volatile char enableBadBoySpammer = 0;
 static volatile bool spammerWithRpc = false;
 static volatile bool isReprocessingSolutions = false;
 
+#include "extensions/global_data.h"
 #include "extensions/cxxopts.h"
 #include "extensions/overload.h"
 
@@ -810,7 +812,7 @@ static void processBroadcastComputors(Peer* peer, RequestResponseHeader* header)
             {
                 ACQUIRE(minerScoreArrayLock);
                 numberOfOwnComputorIndices = 0;
-                for (unsigned int i = 0; i < NUMBER_0F_COMPUT0RS; i++)
+                for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
                 {
                     minerPublicKeys[i] = request->computors.publicKeys[i];
 
@@ -3230,6 +3232,8 @@ static void processTick(unsigned long long processorNumber)
     WAIT_WHILE(contractProcessorState);
     PROFILE_SCOPE_END();
 
+    latestIncomingTransferTickPreserveSpectrumIndexes.clear();
+
     bool isThereQearnTx = false;
     unsigned int tickIndex = ts.tickToIndexCurrentEpoch(system.tick);
     ts.tickData.acquireLock();
@@ -3339,6 +3343,22 @@ static void processTick(unsigned long long processorNumber)
                     }
 
                     processTickTransaction(transaction, transactionIndex, tsCurrentTickTransactionOffsets[transactionIndex], processorNumber);
+
+                    if (!MiningSolutionTransaction::isSolutionTransaction(transaction))
+                    {
+                        forEachComputorId([](const m256i &id)
+                        {
+                            auto spectrumIndex = ::spectrumIndex(id);
+                            if (spectrumIndex >= 0)
+                            {
+                                auto& entityRecord = spectrum[spectrumIndex];
+                                if (entityRecord.latestIncomingTransferTick == system.tick)
+                                {
+                                    latestIncomingTransferTickPreserveSpectrumIndexes.insert(spectrumIndex);
+                                }
+                            }
+                        });
+                    }
 
                     if (transaction->sourcePublicKey == tickLeaderKey)
                     {
@@ -5611,8 +5631,6 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
 
     solutionTotalExecutionTicks = __rdtsc() - solutionProcessStartTick; // for tracking the time processing solutions
 
-    std::set<int> latestIncomingTransferTickPreserveSpectrumIndexes;
-
     ts.tickData.acquireLock();
     for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
     {
@@ -5654,15 +5672,6 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
                             printf("[wrong sol] No need to preserve spectrum index %d latestIncomingTransferTick %u -> %u\n", spectrumIndex, spectrumDataRollback[transactionIndex].latestIncomingTransferTick, spectrum[spectrumIndex].latestIncomingTransferTick);
                         }
                         RELEASE(spectrumLock);
-                    } else
-                    {
-                        // standard tx always change dest latestIncomingTransferTick
-                        const int destSpectrumIndex = ::spectrumIndex(transaction->destinationPublicKey);
-                        if (destSpectrumIndex >= 0)
-                        {
-                            latestIncomingTransferTickPreserveSpectrumIndexes.insert(destSpectrumIndex);
-                            printf("Preserve spectrum index %d latestIncomingTransferTick %u -> %u\n", destSpectrumIndex, spectrumDataRollback[transactionIndex].latestIncomingTransferTick, spectrum[destSpectrumIndex].latestIncomingTransferTick);
-                        }
                     }
                 }
             }
@@ -5677,13 +5686,13 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
         }
     }
 
-    // for (int spectrumIndex : latestIncomingTransferTickPreserveSpectrumIndexes)
-    // {
-    //     ACQUIRE(spectrumLock);
-    //     spectrum[spectrumIndex].latestIncomingTransferTick = system.tick;
-    //     printf("Preserved spectrum index %d latestIncomingTransferTick to current tick %u\n", spectrumIndex, system.tick);
-    //     RELEASE(spectrumLock);
-    // }
+    ACQUIRE(spectrumLock);
+    for (const int spectrumIndex : latestIncomingTransferTickPreserveSpectrumIndexes)
+    {
+        spectrum[spectrumIndex].latestIncomingTransferTick = system.tick;
+        printf("Preserved spectrum index %d latestIncomingTransferTick to current tick %u\n", spectrumIndex, system.tick);
+    }
+    RELEASE(spectrumLock);
 
     ts.tickData.releaseLock();
     isReprocessingSolutions = false;
