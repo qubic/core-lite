@@ -5676,14 +5676,14 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
             }
         }
     }
-    latestIncomingTransferTickPreserveSpectrumIndexes.insert(16501489);
-    for (int spectrumIndex : latestIncomingTransferTickPreserveSpectrumIndexes)
-    {
-        ACQUIRE(spectrumLock);
-        spectrum[spectrumIndex].latestIncomingTransferTick = system.tick;
-        printf("Preserved spectrum index %d latestIncomingTransferTick to current tick %u\n", spectrumIndex, system.tick);
-        RELEASE(spectrumLock);
-    }
+
+    // for (int spectrumIndex : latestIncomingTransferTickPreserveSpectrumIndexes)
+    // {
+    //     ACQUIRE(spectrumLock);
+    //     spectrum[spectrumIndex].latestIncomingTransferTick = system.tick;
+    //     printf("Preserved spectrum index %d latestIncomingTransferTick to current tick %u\n", spectrumIndex, system.tick);
+    //     RELEASE(spectrumLock);
+    // }
 
     ts.tickData.releaseLock();
     isReprocessingSolutions = false;
