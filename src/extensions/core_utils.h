@@ -20,11 +20,11 @@ static bool isComputorId(const m256i& id)
     return false;
 }
 
-static void forEachComputorId(const std::function<void(const m256i &)> & callback)
+static void forEachComputorId(const std::function<void(const m256i &, int)> & callback)
 {
     for (int i = 0; i < NUMBER_OF_COMPUTORS; i++)
     {
-        callback(broadcastedComputors.computors.publicKeys[i]);
+        callback(broadcastedComputors.computors.publicKeys[i], i);
     }
 }
 

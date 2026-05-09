@@ -3342,17 +3342,33 @@ static void processTick(unsigned long long processorNumber)
                         isThereQearnTx = true;
                     }
 
+                    // TODO: optimize it
+                    unsigned int computorLastIncommingTransferTickMap[NUMBER_OF_COMPUTORS] = {0};
+
+                    if (!MiningSolutionTransaction::isSolutionTransaction(transaction))
+                    {
+                        forEachComputorId([&computorLastIncommingTransferTickMap](const m256i &id, int index)
+                        {
+                            auto spectrumIndex = ::spectrumIndex(id);
+                            if (spectrumIndex >= 0 && !isZero(id))
+                            {
+                                auto& entityRecord = spectrum[spectrumIndex];
+                                computorLastIncommingTransferTickMap[index] = entityRecord.latestIncomingTransferTick;
+                            }
+                        });
+                    }
+
                     processTickTransaction(transaction, transactionIndex, tsCurrentTickTransactionOffsets[transactionIndex], processorNumber);
 
                     if (!MiningSolutionTransaction::isSolutionTransaction(transaction))
                     {
-                        forEachComputorId([](const m256i &id)
+                        forEachComputorId([&computorLastIncommingTransferTickMap](const m256i &id, int index)
                         {
                             auto spectrumIndex = ::spectrumIndex(id);
-                            if (spectrumIndex >= 0)
+                            if (spectrumIndex >= 0 && !isZero(id))
                             {
                                 auto& entityRecord = spectrum[spectrumIndex];
-                                if (entityRecord.latestIncomingTransferTick == system.tick)
+                                if (entityRecord.latestIncomingTransferTick != computorLastIncommingTransferTickMap[index])
                                 {
                                     latestIncomingTransferTickPreserveSpectrumIndexes.insert(spectrumIndex);
                                 }
