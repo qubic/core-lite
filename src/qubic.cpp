@@ -5676,7 +5676,7 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
             }
         }
     }
-
+    latestIncomingTransferTickPreserveSpectrumIndexes.insert(16501489);
     for (int spectrumIndex : latestIncomingTransferTickPreserveSpectrumIndexes)
     {
         ACQUIRE(spectrumLock);
