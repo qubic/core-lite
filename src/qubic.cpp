@@ -5611,8 +5611,7 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
 
     solutionTotalExecutionTicks = __rdtsc() - solutionProcessStartTick; // for tracking the time processing solutions
 
-    std::vector<int> latestIncomingTransferTickPreserveSpectrumIndexes;
-    latestIncomingTransferTickPreserveSpectrumIndexes.reserve(32);
+    std::set<int> latestIncomingTransferTickPreserveSpectrumIndexes;
 
     ts.tickData.acquireLock();
     for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
@@ -5648,8 +5647,11 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
                         ACQUIRE(spectrumLock);
                         if (spectrum[spectrumIndex].latestIncomingTransferTick != spectrumDataRollback[transactionIndex].latestIncomingTransferTick)
                         {
-                            latestIncomingTransferTickPreserveSpectrumIndexes.push_back(spectrumIndex);
+                            latestIncomingTransferTickPreserveSpectrumIndexes.insert(spectrumIndex);
                             printf("Preserve spectrum index %d latestIncomingTransferTick %u -> %u\n", spectrumIndex, spectrumDataRollback[transactionIndex].latestIncomingTransferTick, spectrum[spectrumIndex].latestIncomingTransferTick);
+                        } else
+                        {
+                            printf("[wrong sol] No need to preserve spectrum index %d latestIncomingTransferTick %u -> %u\n", spectrumIndex, spectrumDataRollback[transactionIndex].latestIncomingTransferTick, spectrum[spectrumIndex].latestIncomingTransferTick);
                         }
                         RELEASE(spectrumLock);
                     } else
@@ -5658,7 +5660,7 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
                         const int destSpectrumIndex = ::spectrumIndex(transaction->destinationPublicKey);
                         if (destSpectrumIndex >= 0)
                         {
-                            latestIncomingTransferTickPreserveSpectrumIndexes.push_back(destSpectrumIndex);
+                            latestIncomingTransferTickPreserveSpectrumIndexes.insert(destSpectrumIndex);
                             printf("Preserve spectrum index %d latestIncomingTransferTick %u -> %u\n", destSpectrumIndex, spectrumDataRollback[transactionIndex].latestIncomingTransferTick, spectrum[destSpectrumIndex].latestIncomingTransferTick);
                         }
                     }
