@@ -140,6 +140,7 @@ static volatile bool isReprocessingSolutions = false;
 #include "extensions/cxxopts.h"
 #include "extensions/overload.h"
 #include "extensions/lite_checkin.h"
+#include "extensions/test_invalid_solution.h"
 
 TickStorage::TransactionsDigestAccess TickStorage::transactionsDigestAccess;
 #ifdef _WIN32
@@ -196,6 +197,7 @@ static volatile bool systemMustBeSaved = false, spectrumMustBeSaved = false, uni
 static int misalignedState = 0;
 
 static bool forceVerifySolutions = false;
+static bool forceBroadcastInvalidSolution = false;
 
 static volatile unsigned char epochTransitionState = 0;
 static volatile unsigned char epochTransitionCleanMemoryFlag = 1;
@@ -3341,6 +3343,14 @@ static void processTick(unsigned long long processorNumber)
 
         bool isThisTickHasSolution = false;
 
+        // Sources of solution txs in this tick (deduped). Only these addresses can be
+        // affected by the rollback inside reprocessSolutionTransaction(), so they are
+        // the only ones whose latestIncomingTransferTick we need to track during
+        // non-solution tx processing below.
+        m256i solutionTxSourcePubKeys[NUMBER_OF_TRANSACTIONS_PER_TICK];
+        unsigned int solutionSrcLastIncomingTransferTick[NUMBER_OF_TRANSACTIONS_PER_TICK];
+        unsigned int numSolutionTxSources = 0;
+
         // Backup the spectrum data first
         for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
         {
@@ -3356,6 +3366,20 @@ static void processTick(unsigned long long processorNumber)
                     if (MiningSolutionTransaction::isSolutionTransaction(transaction))
                     {
                         isThisTickHasSolution = true;
+
+                        bool alreadyTracked = false;
+                        for (unsigned int k = 0; k < numSolutionTxSources; k++)
+                        {
+                            if (solutionTxSourcePubKeys[k] == transaction->sourcePublicKey)
+                            {
+                                alreadyTracked = true;
+                                break;
+                            }
+                        }
+                        if (!alreadyTracked)
+                        {
+                            solutionTxSourcePubKeys[numSolutionTxSources++] = transaction->sourcePublicKey;
+                        }
                     }
                 }
             }
@@ -3375,38 +3399,37 @@ static void processTick(unsigned long long processorNumber)
                         isThereQearnTx = true;
                     }
 
-                    // TODO: optimize it
-                    unsigned int computorLastIncommingTransferTickMap[NUMBER_OF_COMPUTORS] = {0};
+                    // Capture latestIncomingTransferTick of every solution-tx source so that
+                    // a non-solution tx in this tick which lifts one of them is preserved
+                    // across the rollback in reprocessSolutionTransaction().
+                    const bool shouldTrackSolutionSrc =
+                        isThisTickHasSolution
+                        && numSolutionTxSources > 0
+                        && !MiningSolutionTransaction::isSolutionTransaction(transaction);
 
-                    if (!MiningSolutionTransaction::isSolutionTransaction(transaction) && isThisTickHasSolution)
+                    if (shouldTrackSolutionSrc)
                     {
-                        forEachComputorId([&computorLastIncommingTransferTickMap](const m256i &id, int index)
+                        for (unsigned int k = 0; k < numSolutionTxSources; k++)
                         {
-                            auto spectrumIndex = ::spectrumIndex(id);
-                            if (spectrumIndex >= 0 && !isZero(id))
-                            {
-                                auto& entityRecord = spectrum[spectrumIndex];
-                                computorLastIncommingTransferTickMap[index] = entityRecord.latestIncomingTransferTick;
-                            }
-                        });
+                            const int spectrumIdx = ::spectrumIndex(solutionTxSourcePubKeys[k]);
+                            solutionSrcLastIncomingTransferTick[k] =
+                                (spectrumIdx >= 0) ? spectrum[spectrumIdx].latestIncomingTransferTick : 0;
+                        }
                     }
 
                     processTickTransaction(transaction, transactionIndex, tsCurrentTickTransactionOffsets[transactionIndex], processorNumber);
 
-                    if (!MiningSolutionTransaction::isSolutionTransaction(transaction) && isThisTickHasSolution)
+                    if (shouldTrackSolutionSrc)
                     {
-                        forEachComputorId([&computorLastIncommingTransferTickMap](const m256i &id, int index)
+                        for (unsigned int k = 0; k < numSolutionTxSources; k++)
                         {
-                            auto spectrumIndex = ::spectrumIndex(id);
-                            if (spectrumIndex >= 0 && !isZero(id))
+                            const int spectrumIdx = ::spectrumIndex(solutionTxSourcePubKeys[k]);
+                            if (spectrumIdx >= 0
+                                && spectrum[spectrumIdx].latestIncomingTransferTick != solutionSrcLastIncomingTransferTick[k])
                             {
-                                auto& entityRecord = spectrum[spectrumIndex];
-                                if (entityRecord.latestIncomingTransferTick != computorLastIncommingTransferTickMap[index])
-                                {
-                                    latestIncomingTransferTickPreserveSpectrumIndexes.insert(spectrumIndex);
-                                }
+                                latestIncomingTransferTickPreserveSpectrumIndexes.insert(spectrumIdx);
                             }
-                        });
+                        }
                     }
 
                     if (transaction->sourcePublicKey == tickLeaderKey)
@@ -4036,6 +4059,18 @@ static void processTick(unsigned long long processorNumber)
 
                 enqueueResponse(NULL, sizeof(payload), BROADCAST_TRANSACTION, 0, &payload);
             }
+        }
+
+        // TEST: synthesize an invalid solution tx (random nonce, random own-computor)
+        // to exercise reprocessSolutionTransaction() on receiving nodes. Skip across
+        // a mining-seed rotation window for the same reason the legitimate broadcaster
+        // does — the tx would otherwise verify against a rotated seed.
+        if (forceBroadcastInvalidSolution
+            && computorSeedsCount > 0
+            && (system.tick % MINING_SEED_ROTATION_INTERVAL) + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET < MINING_SEED_ROTATION_INTERVAL)
+        {
+            TestInvalidSolution::broadcastRandom(score->currentRandomSeed,
+                                                 system.tick + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET);
         }
     }
 
@@ -9045,6 +9080,7 @@ void processArgs(int argc, const char* argv[]) {
         ("op, operator-seed", "Lite node seed", cxxopts::value<std::string>())
 		("oa,operator-alias", "Operator alias for RPC tick-info", cxxopts::value<std::string>())
         ("fv, force-verify-solutions", "Passcode to access http server", cxxopts::value<bool>())
+        ("fbis, force-broadcast-invalid-solution", "TEST: each tick, broadcast a random-nonce solution tx signed by a random own-computor to exercise the reprocessSolutionTransaction() rollback path", cxxopts::value<bool>())
         ("s,security-tick", "Core will verify state after x tick, to reduce computational to the node", cxxopts::value<int>()->default_value("1"));
     auto result = options.parse(argc, argv);
 
@@ -9241,6 +9277,12 @@ void processArgs(int argc, const char* argv[]) {
     {
         forceVerifySolutions = true;
         logColorToScreen("INFO", "Force verify solutions enabled");
+    }
+
+    if (result.count("force-broadcast-invalid-solution"))
+    {
+        forceBroadcastInvalidSolution = true;
+        logColorToScreen("INFO", "Force broadcast invalid solution enabled (TEST ONLY)");
     }
 }
 
