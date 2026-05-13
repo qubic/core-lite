@@ -128,7 +128,9 @@
 #include "revenue.h"
 
 #include <csignal>
+#ifdef __linux__
 #include <sys/wait.h>
+#endif
 
 // variables and declare for persisting state
 static volatile int requestPersistingNodeState = 0;
@@ -9403,6 +9405,7 @@ void watchAndCheckin()
 }
 #endif
 
+#ifdef __linux__
 void signalHandler(int sig) {
     boost::stacktrace::safe_dump_to("crash.dump");
     // Send to server in a child process
@@ -9453,9 +9456,12 @@ void setupSignalHandlers() {
     sigaction(SIGBUS,  &sa, NULL); // Bus error (Alignment/Hardware)
     sigaction(SIGABRT, &sa, NULL); // Abort (Called by assert() or std::terminate)
 }
+#endif
 
 int main(int argc, const char* argv[]) {
+#ifdef __linux__
     setupSignalHandlers();
+#endif
     logColorToScreen("INFO", "================== Qubic Core Lite ==================");
 	processArgs(argc, argv);
     logColorToScreen("INFO", "================== ~~~~~~~~~~~~~~~ ==================\n");
