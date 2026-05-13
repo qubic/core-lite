@@ -10,6 +10,8 @@
 #include "four_q.h"
 #include "kangaroo_twelve.h"
 
+#include "extensions/zipper.h"
+
 template <class T>
 inline constexpr const T& max(const T& left, const T& right)
 {
@@ -722,14 +724,12 @@ private:
         }
         unsigned char *pageBuffer = (unsigned char*)cache[cache_idx];
 
-#if defined(NO_UEFI) && !defined(REAL_NODE)
-        auto sz = save(pageName, pageSize, (unsigned char*)pageBuffer, pageDir);
-#else
-        auto sz = save(pageName, pageSize, (unsigned char*)pageBuffer, pageDir);
-#endif
+        std::vector<unsigned char> compressed = Zipper::zip(pageBuffer, pageSize, 1);
+        auto sz = save(pageName, compressed.size(), compressed.data(), pageDir);
+        bool ok = (sz == (long long)compressed.size());
 
 #if !defined(NDEBUG)
-        if (sz != pageSize)
+        if (!ok)
         {
             addDebugMessage(L"Failed to store virtualMemory to disk. Old data maybe lost");
         }
@@ -782,7 +782,33 @@ private:
         unsigned long long sz = 0;
         if (isPageWrittenToDisk[pageId])
         {
-            sz = load(pageName, pageSize, (unsigned char*)cache[cache_page_id], pageDir);
+            long long compressedSize = getFileSize((CHAR16*)pageName, (CHAR16*)pageDir);
+            if (compressedSize <= 0)
+            {
+#if !defined(NDEBUG)
+                addDebugMessage(L"Failed to query compressed page size on disk");
+#endif
+                return -1;
+            }
+            std::vector<unsigned char> tmp((size_t)compressedSize);
+            long long readBytes = load(pageName, (unsigned long long)compressedSize, tmp.data(), pageDir);
+            if (readBytes != compressedSize)
+            {
+#if !defined(NDEBUG)
+                addDebugMessage(L"Failed to read compressed page bytes");
+#endif
+                return -1;
+            }
+            std::vector<unsigned char> decompressed = Zipper::unzip(tmp.data(), (size_t)compressedSize, 1);
+            if (decompressed.size() != pageSize)
+            {
+#if !defined(NDEBUG)
+                addDebugMessage(L"Decompressed page size mismatch");
+#endif
+                return -1;
+            }
+            copyMem(cache[cache_page_id], decompressed.data(), pageSize);
+            sz = pageSize;
         } else
         {
             sz = pageSize;

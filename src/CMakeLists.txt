@@ -166,7 +166,7 @@ target_link_libraries(Qubic
         platform_common
         platform_efi
         -Wl,-Bstatic
-        jsoncpp_static drogon fmt::fmt backtrace_static
+        jsoncpp_static drogon fmt::fmt backtrace_static Blosc2::blosc2_static
         -Wl,-Bdynamic
         Threads::Threads
         dl

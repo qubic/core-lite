@@ -99,6 +99,7 @@ target_link_libraries(
   GTest::gtest_main
   platform_common
   platform_os
+  Blosc2::blosc2_static
 )
 
 include(GoogleTest)
