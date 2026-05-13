@@ -5750,6 +5750,7 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
                         spectrum[spectrumIndex].latestIncomingTransferTick = spectrumDataRollback[transactionIndex].latestIncomingTransferTick;
 
                         spectrumInfo.totalAmount -= transaction->amount;
+                        auto backupNumberOfIncomingTransfers = spectrum[spectrumIndex].numberOfIncomingTransfers;
                         RELEASE(spectrumLock);
 
                         // Then, process the transaction again
@@ -5757,7 +5758,7 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
 
                         // if the numberOfIncomingTransfers after != previous (correct sol) -> we need to preserve latestIncomingTransferTick to avoid later incorrect sol reset it.
                         ACQUIRE(spectrumLock);
-                        if (spectrum[spectrumIndex].numberOfIncomingTransfers != spectrumDataRollback[transactionIndex].numberOfIncomingTransfers)
+                        if (spectrum[spectrumIndex].numberOfIncomingTransfers != backupNumberOfIncomingTransfers)
                         {
                             latestIncomingTransferTickPreservePubkeys.push_back(transaction->sourcePublicKey);
                         }
