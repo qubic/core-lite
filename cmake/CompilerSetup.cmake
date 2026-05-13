@@ -174,7 +174,7 @@ endif()
 # --- CPU Instruction Set Flags ---
 
 # Allow the user to enable AVX-512
-option(ENABLE_AVX512 "Enable AVX-512 instructions" ON)
+option(ENABLE_AVX512 "Enable AVX-512 instructions" OFF)
 
 # Define CPU instruction set flags
 set(CPU_INSTRUCTION_FLAGS "" CACHE INTERNAL "CPU instruction set flags")
