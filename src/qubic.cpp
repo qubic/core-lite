@@ -2578,9 +2578,6 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
         const int threshold = (system.epoch < MAX_NUMBER_EPOCH) ?
                 solutionThreshold[system.epoch][selectedAlgo]
                 : score_engine::DEFAUL_SOLUTION_THRESHOLD[selectedAlgo];
-#ifdef TESTNET
-        unsigned int solutionScore = (*::score)(processorNumber, transaction->sourcePublicKey, transaction->miningSeed, transaction->nonce);
-#else
         unsigned int solutionScore;
         if (isMainMode() || isRevalidation || isLastTickInEpoch() || forceVerifySolutions)
         {
@@ -2590,7 +2587,7 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
             // Make the score is valid
             solutionScore = threshold + 1;
         }
-#endif
+
         if (score->isValidScore(solutionScore, selectedAlgo))
         {
             resourceTestingDigest ^= solutionScore;
@@ -5730,6 +5727,22 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
                         && transaction->amount >= MiningSolutionTransaction::minAmount()
                         && transaction->inputType == MiningSolutionTransaction::transactionType())
                     {
+                        CHAR16 srcChars[60 + 1];
+                        CHAR16 seedChars[60 + 1];
+                        CHAR16 nonceChars[60 + 1];
+                        getIdentity(transaction->sourcePublicKey.m256i_u8, srcChars, true);
+                        getIdentity(transaction->inputPtr(), seedChars, true);
+                        getIdentity(transaction->inputPtr() + 32, nonceChars, true);
+                        setText(message, L"Reprocess sol tx #");
+                        appendNumber(message, transactionIndex, FALSE);
+                        appendText(message, L" src=");
+                        appendText(message, srcChars);
+                        appendText(message, L" seed=");
+                        appendText(message, seedChars);
+                        appendText(message, L" nonce=");
+                        appendText(message, nonceChars);
+                        logToConsole(message);
+
                         // First, revert the spectrum changes made by this transaction
                         ACQUIRE(spectrumLock);
                         spectrum[spectrumIndex].incomingAmount -= transaction->amount;
@@ -6176,7 +6189,18 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                         // If the spectrum digest from quorum doesn't match with etalonTick, that indicates there is invalid solutions in current tick
                         if (etalonTick.saltedSpectrumDigest != spectrumDigestFromQuorum)
                         {
-                            logToConsole(L"Invalid solutions detected, reprocessing solutions...");
+                            CHAR16 localDigestChars[60 + 1];
+                            CHAR16 quorumDigestChars[60 + 1];
+                            getIdentity(etalonTick.saltedSpectrumDigest.m256i_u8, localDigestChars, true);
+                            getIdentity(spectrumDigestFromQuorum.m256i_u8, quorumDigestChars, true);
+                            setText(message, L"Invalid solutions detected at tick ");
+                            appendNumber(message, system.tick, FALSE);
+                            appendText(message, L": local=");
+                            appendText(message, localDigestChars);
+                            appendText(message, L" quorum=");
+                            appendText(message, quorumDigestChars);
+                            appendText(message, L". Reprocessing solutions...");
+                            logToConsole(message);
                             resourceTestingDigest = resourceTestingDigestRollback;
                             etalonTick.saltedResourceTestingDigest = resourceTestingDigest;
                             reprocessSolutionTransaction(processorNumber);
