@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef __linux__
+
 #include <blosc2.h>
 #include <stdexcept>
 #include <thread>
@@ -73,3 +75,5 @@ public:
         return decompressed_out;
     }
 };
+
+#endif // __linux__

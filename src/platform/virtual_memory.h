@@ -724,9 +724,14 @@ private:
         }
         unsigned char *pageBuffer = (unsigned char*)cache[cache_idx];
 
+#ifdef __linux__
         std::vector<unsigned char> compressed = Zipper::zip(pageBuffer, pageSize, 1);
         auto sz = save(pageName, compressed.size(), compressed.data(), pageDir);
         bool ok = (sz == (long long)compressed.size());
+#else
+        auto sz = save(pageName, pageSize, pageBuffer, pageDir);
+        bool ok = (sz == (long long)pageSize);
+#endif
 
 #if !defined(NDEBUG)
         if (!ok)
@@ -782,6 +787,7 @@ private:
         unsigned long long sz = 0;
         if (isPageWrittenToDisk[pageId])
         {
+#ifdef __linux__
             long long compressedSize = getFileSize((CHAR16*)pageName, (CHAR16*)pageDir);
             if (compressedSize <= 0)
             {
@@ -809,6 +815,9 @@ private:
             }
             copyMem(cache[cache_page_id], decompressed.data(), pageSize);
             sz = pageSize;
+#else
+            sz = load(pageName, pageSize, (unsigned char*)cache[cache_page_id], pageDir);
+#endif
         } else
         {
             sz = pageSize;
