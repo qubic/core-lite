@@ -9083,7 +9083,8 @@ void processArgs(int argc, const char* argv[]) {
 		("oa,operator-alias", "Operator alias for RPC tick-info", cxxopts::value<std::string>())
         ("fv, force-verify-solutions", "Passcode to access http server", cxxopts::value<bool>())
         ("fbis, force-broadcast-invalid-solution", "TEST: each tick, broadcast a random-nonce solution tx signed by a random own-computor to exercise the reprocessSolutionTransaction() rollback path", cxxopts::value<bool>())
-        ("s,security-tick", "Core will verify state after x tick, to reduce computational to the node", cxxopts::value<int>()->default_value("1"));
+        ("s,security-tick", "Core will verify state after x tick, to reduce computational to the node", cxxopts::value<int>()->default_value("1"))
+        ("http-port", "Port for the built-in HTTP/RPC server to listen on", cxxopts::value<int>()->default_value("41841"));
     auto result = options.parse(argc, argv);
 
     if (result.count("peers")) {
@@ -9139,6 +9140,16 @@ void processArgs(int argc, const char* argv[]) {
     if (result.count("ticking-delay")) {
         tickDelay = result["ticking-delay"].as<int>();
         logColorToScreen("INFO", "Ticking delay set to " + std::to_string(tickDelay) + " ms");
+    }
+
+    if (result.count("http-port")) {
+        int port = result["http-port"].as<int>();
+        if (port <= 0 || port > 65535) {
+            logColorToScreen("ERROR", "Invalid HTTP port: " + std::to_string(port));
+            exit(1);
+        }
+        httpPort = port;
+        logColorToScreen("INFO", "HTTP server port set to " + std::to_string(httpPort));
     }
 
     if (result.count("testnet-gbt"))
@@ -9351,7 +9362,7 @@ int main(int argc, const char* argv[]) {
 
     Overload::initializeUefi();
 #if defined(__linux__) && !defined(NO_RPC)
-    QubicHttpServer::start();
+    QubicHttpServer::start(httpPort);
     watchAndCheckin();
 #endif
     auto status = (int)efi_main(ih, st);

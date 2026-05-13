@@ -126,6 +126,10 @@ static inline unsigned long long tickDelay = 0;
 
 static inline unsigned long long securityTick = 1;
 
+//////////// HTTP Server Port \\\\\\\\\\\\
+
+static inline int httpPort = 41841;
+
 bool isSystemAtSecurityTick()
 {
     if (forceDontCheckComputerDigest)
