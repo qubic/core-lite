@@ -5,6 +5,5 @@
     <mapping directory="$PROJECT_DIR$/build/_deps/drogon-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/build/_deps/drogon-src/trantor" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/build/_deps/fmt-src" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/build/_deps/googletest-src" vcs="Git" />
   </component>
 </project>

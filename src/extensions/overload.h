@@ -46,6 +46,11 @@ static std::string myOperatorId(60, 0);
 static m256i myPublicKey;
 static std::string nodeAlias = "My Qubic Lite Node";
 
+// Shared start anchor for uptime reporting on both the HTTP /tick-info
+// handler and the P2P RequestLiteCheckin handler. Initialized at static
+// init (before main), so it does not depend on which endpoint is hit first.
+static const auto liteNodeStartTime = std::chrono::system_clock::now();
+
 
 #if defined(__linux__)
 #include <json/config.h>
@@ -63,8 +68,6 @@ std::string getQubicVersionString()
 
 Json::Value getCheckInData(const std::string& challenge = "")
 {
-    static auto startTime = std::chrono::system_clock::now();
-
     auto jsonToBytes = [](const Json::Value& json) -> std::vector<unsigned char> {
         Json::StreamWriterBuilder writer;
         writer["indentation"] = ""; // No indentation for compact representation
@@ -84,7 +87,7 @@ Json::Value getCheckInData(const std::string& challenge = "")
         checkinData["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
                                        std::chrono::system_clock::now().time_since_epoch()).count();
         checkinData["uptime"] = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::system_clock::now() - startTime).count();
+            std::chrono::system_clock::now() - liteNodeStartTime).count();
 
         if (!challenge.empty())
         {

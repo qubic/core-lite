@@ -103,9 +103,10 @@ ENV QUBIC_BINARY_STAGING_DIR="/opt/qubic-bin"
 ENV QUBIC_LOG_LEVEL="INFO"
 ENV QUBIC_LOG_FORMAT="json"
 
-# Docker health check via the Qubic HTTP API
-HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
-    CMD curl -sf http://127.0.0.1:41841/tick-info || exit 1
+# No Docker HEALTHCHECK: the Python orchestrator's watchdog already polls the
+# node and reacts on failure. A HEALTHCHECK CMD would just spawn a child of
+# PID 1 every interval, and PID 1 (Python asyncio) doesn't reap arbitrary
+# orphans — that produced zombie curl processes. Remove the duplication.
 
 # PID 1: Python orchestrator
 ENTRYPOINT ["python", "-m", "app"]
