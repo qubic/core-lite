@@ -1,4 +1,4 @@
 #pragma once
 #include <set>
 
-static inline std::set<int> latestIncomingTransferTickPreserveSpectrumIndexes{};
+static inline std::vector<m256i> latestIncomingTransferTickPreservePubkeys{};

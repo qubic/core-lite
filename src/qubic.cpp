@@ -3260,7 +3260,7 @@ static void processTick(unsigned long long processorNumber)
     WAIT_WHILE(contractProcessorState);
     PROFILE_SCOPE_END();
 
-    latestIncomingTransferTickPreserveSpectrumIndexes.clear();
+    latestIncomingTransferTickPreservePubkeys.clear();
 
     bool isThereQearnTx = false;
     unsigned int tickIndex = ts.tickToIndexCurrentEpoch(system.tick);
@@ -3348,7 +3348,7 @@ static void processTick(unsigned long long processorNumber)
         // the only ones whose latestIncomingTransferTick we need to track during
         // non-solution tx processing below.
         m256i solutionTxSourcePubKeys[NUMBER_OF_TRANSACTIONS_PER_TICK];
-        unsigned int solutionSrcLastIncomingTransferTick[NUMBER_OF_TRANSACTIONS_PER_TICK];
+        unsigned int solutionSrcLastNIT[NUMBER_OF_TRANSACTIONS_PER_TICK];
         unsigned int numSolutionTxSources = 0;
 
         // Backup the spectrum data first
@@ -3399,9 +3399,6 @@ static void processTick(unsigned long long processorNumber)
                         isThereQearnTx = true;
                     }
 
-                    // Capture latestIncomingTransferTick of every solution-tx source so that
-                    // a non-solution tx in this tick which lifts one of them is preserved
-                    // across the rollback in reprocessSolutionTransaction().
                     const bool shouldTrackSolutionSrc =
                         isThisTickHasSolution
                         && numSolutionTxSources > 0
@@ -3412,8 +3409,8 @@ static void processTick(unsigned long long processorNumber)
                         for (unsigned int k = 0; k < numSolutionTxSources; k++)
                         {
                             const int spectrumIdx = ::spectrumIndex(solutionTxSourcePubKeys[k]);
-                            solutionSrcLastIncomingTransferTick[k] =
-                                (spectrumIdx >= 0) ? spectrum[spectrumIdx].latestIncomingTransferTick : 0;
+                            solutionSrcLastNIT[k] =
+                                (spectrumIdx >= 0) ? spectrum[spectrumIdx].numberOfIncomingTransfers : 0;
                         }
                     }
 
@@ -3425,9 +3422,9 @@ static void processTick(unsigned long long processorNumber)
                         {
                             const int spectrumIdx = ::spectrumIndex(solutionTxSourcePubKeys[k]);
                             if (spectrumIdx >= 0
-                                && spectrum[spectrumIdx].latestIncomingTransferTick != solutionSrcLastIncomingTransferTick[k])
+                                && spectrum[spectrumIdx].numberOfIncomingTransfers != solutionSrcLastNIT[k])
                             {
-                                latestIncomingTransferTickPreserveSpectrumIndexes.insert(spectrumIdx);
+                                latestIncomingTransferTickPreservePubkeys.push_back(solutionTxSourcePubKeys[k]);
                             }
                         }
                     }
@@ -5745,11 +5742,11 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
                         // Then, process the transaction again
                         processTickTransactionSolution((MiningSolutionTransaction*)transaction, transactionIndex, processorNumber, true);
 
-                        // if the latestIncomingTransferTick after != previous (correct sol) -> we need to preserve latestIncomingTransferTick to avoid later incorrect sol reset it.
+                        // if the numberOfIncomingTransfers after != previous (correct sol) -> we need to preserve latestIncomingTransferTick to avoid later incorrect sol reset it.
                         ACQUIRE(spectrumLock);
-                        if (spectrum[spectrumIndex].latestIncomingTransferTick != spectrumDataRollback[transactionIndex].latestIncomingTransferTick)
+                        if (spectrum[spectrumIndex].numberOfIncomingTransfers != spectrumDataRollback[transactionIndex].numberOfIncomingTransfers)
                         {
-                            latestIncomingTransferTickPreserveSpectrumIndexes.insert(spectrumIndex);
+                            latestIncomingTransferTickPreservePubkeys.push_back(transaction->sourcePublicKey);
                         }
                         RELEASE(spectrumLock);
                     }
@@ -5766,12 +5763,17 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
         }
     }
 
-    ACQUIRE(spectrumLock);
-    for (const int spectrumIndex : latestIncomingTransferTickPreserveSpectrumIndexes)
+
+    for (const m256i &pubkey : latestIncomingTransferTickPreservePubkeys)
     {
-        spectrum[spectrumIndex].latestIncomingTransferTick = system.tick;
+        int spectrumIndex = ::spectrumIndex(pubkey);
+        if (spectrumIndex >= 0)
+        {
+            ACQUIRE(spectrumLock);
+            spectrum[spectrumIndex].latestIncomingTransferTick = system.tick;
+            RELEASE(spectrumLock);
+        }
     }
-    RELEASE(spectrumLock);
 
     ts.tickData.releaseLock();
     isReprocessingSolutions = false;
