@@ -148,6 +148,7 @@ static volatile bool isReprocessingSolutions = false;
 #include "extensions/overload.h"
 #include "extensions/lite_checkin.h"
 #include "extensions/k12_engine.h"
+#include "extensions/test_invalid_solution.h"
 
 TickStorage::TransactionsDigestAccess TickStorage::transactionsDigestAccess;
 #ifdef _WIN32
@@ -204,6 +205,7 @@ static volatile bool systemMustBeSaved = false, spectrumMustBeSaved = false, uni
 static int misalignedState = 0;
 
 static bool forceVerifySolutions = false;
+static bool forceBroadcastInvalidSolution = false;
 
 static volatile unsigned char epochTransitionState = 0;
 static volatile unsigned char epochTransitionCleanMemoryFlag = 1;
@@ -2595,9 +2597,6 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
         const int threshold = (system.epoch < MAX_NUMBER_EPOCH) ?
                 solutionThreshold[system.epoch][selectedAlgo]
                 : score_engine::DEFAUL_SOLUTION_THRESHOLD[selectedAlgo];
-#ifdef TESTNET
-        unsigned int solutionScore = (*::score)(processorNumber, transaction->sourcePublicKey, transaction->miningSeed, transaction->nonce);
-#else
         unsigned int solutionScore;
         if (isMainMode() || isRevalidation || isLastTickInEpoch() || forceVerifySolutions)
         {
@@ -2607,7 +2606,7 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
             // Make the score is valid
             solutionScore = threshold + 1;
         }
-#endif
+
         if (score->isValidScore(solutionScore, selectedAlgo))
         {
             resourceTestingDigest ^= solutionScore;
@@ -3278,7 +3277,7 @@ static void processTick(unsigned long long processorNumber)
     WAIT_WHILE(contractProcessorState);
     PROFILE_SCOPE_END();
 
-    latestIncomingTransferTickPreserveSpectrumIndexes.clear();
+    latestIncomingTransferTickPreservePubkeys.clear();
 
     bool isThereQearnTx = false;
     unsigned int tickIndex = ts.tickToIndexCurrentEpoch(system.tick);
@@ -3361,6 +3360,14 @@ static void processTick(unsigned long long processorNumber)
 
         bool isThisTickHasSolution = false;
 
+        // Sources of solution txs in this tick (deduped). Only these addresses can be
+        // affected by the rollback inside reprocessSolutionTransaction(), so they are
+        // the only ones whose latestIncomingTransferTick we need to track during
+        // non-solution tx processing below.
+        m256i solutionTxSourcePubKeys[NUMBER_OF_TRANSACTIONS_PER_TICK];
+        unsigned int solutionSrcLastNIT[NUMBER_OF_TRANSACTIONS_PER_TICK];
+        unsigned int numSolutionTxSources = 0;
+
         // Backup the spectrum data first
         for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
         {
@@ -3376,6 +3383,20 @@ static void processTick(unsigned long long processorNumber)
                     if (MiningSolutionTransaction::isSolutionTransaction(transaction))
                     {
                         isThisTickHasSolution = true;
+
+                        bool alreadyTracked = false;
+                        for (unsigned int k = 0; k < numSolutionTxSources; k++)
+                        {
+                            if (solutionTxSourcePubKeys[k] == transaction->sourcePublicKey)
+                            {
+                                alreadyTracked = true;
+                                break;
+                            }
+                        }
+                        if (!alreadyTracked)
+                        {
+                            solutionTxSourcePubKeys[numSolutionTxSources++] = transaction->sourcePublicKey;
+                        }
                     }
                 }
             }
@@ -3395,38 +3416,34 @@ static void processTick(unsigned long long processorNumber)
                         isThereQearnTx = true;
                     }
 
-                    // TODO: optimize it
-                    unsigned int computorLastIncommingTransferTickMap[NUMBER_OF_COMPUTORS] = {0};
+                    const bool shouldTrackSolutionSrc =
+                        isThisTickHasSolution
+                        && numSolutionTxSources > 0
+                        && !MiningSolutionTransaction::isSolutionTransaction(transaction);
 
-                    if (!MiningSolutionTransaction::isSolutionTransaction(transaction) && isThisTickHasSolution)
+                    if (shouldTrackSolutionSrc)
                     {
-                        forEachComputorId([&computorLastIncommingTransferTickMap](const m256i &id, int index)
+                        for (unsigned int k = 0; k < numSolutionTxSources; k++)
                         {
-                            auto spectrumIndex = ::spectrumIndex(id);
-                            if (spectrumIndex >= 0 && !isZero(id))
-                            {
-                                auto& entityRecord = spectrum[spectrumIndex];
-                                computorLastIncommingTransferTickMap[index] = entityRecord.latestIncomingTransferTick;
-                            }
-                        });
+                            const int spectrumIdx = ::spectrumIndex(solutionTxSourcePubKeys[k]);
+                            solutionSrcLastNIT[k] =
+                                (spectrumIdx >= 0) ? spectrum[spectrumIdx].numberOfIncomingTransfers : 0;
+                        }
                     }
 
                     processTickTransaction(transaction, transactionIndex, tsCurrentTickTransactionOffsets[transactionIndex], processorNumber);
 
-                    if (!MiningSolutionTransaction::isSolutionTransaction(transaction) && isThisTickHasSolution)
+                    if (shouldTrackSolutionSrc)
                     {
-                        forEachComputorId([&computorLastIncommingTransferTickMap](const m256i &id, int index)
+                        for (unsigned int k = 0; k < numSolutionTxSources; k++)
                         {
-                            auto spectrumIndex = ::spectrumIndex(id);
-                            if (spectrumIndex >= 0 && !isZero(id))
+                            const int spectrumIdx = ::spectrumIndex(solutionTxSourcePubKeys[k]);
+                            if (spectrumIdx >= 0
+                                && spectrum[spectrumIdx].numberOfIncomingTransfers != solutionSrcLastNIT[k])
                             {
-                                auto& entityRecord = spectrum[spectrumIndex];
-                                if (entityRecord.latestIncomingTransferTick != computorLastIncommingTransferTickMap[index])
-                                {
-                                    latestIncomingTransferTickPreserveSpectrumIndexes.insert(spectrumIndex);
-                                }
+                                latestIncomingTransferTickPreservePubkeys.push_back(solutionTxSourcePubKeys[k]);
                             }
-                        });
+                        }
                     }
 
                     if (transaction->sourcePublicKey == tickLeaderKey)
@@ -4068,6 +4085,18 @@ static void processTick(unsigned long long processorNumber)
 
                 enqueueResponse(NULL, sizeof(payload), BROADCAST_TRANSACTION, 0, &payload);
             }
+        }
+
+        // TEST: synthesize an invalid solution tx (random nonce, random own-computor)
+        // to exercise reprocessSolutionTransaction() on receiving nodes. Skip across
+        // a mining-seed rotation window for the same reason the legitimate broadcaster
+        // does — the tx would otherwise verify against a rotated seed.
+        if (forceBroadcastInvalidSolution
+            && computorSeedsCount > 0
+            && (system.tick % MINING_SEED_ROTATION_INTERVAL) + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET < MINING_SEED_ROTATION_INTERVAL)
+        {
+            TestInvalidSolution::broadcastRandom(score->currentRandomSeed,
+                                                 system.tick + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET);
         }
     }
 
@@ -5736,6 +5765,22 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
                         && transaction->amount >= MiningSolutionTransaction::minAmount()
                         && transaction->inputType == MiningSolutionTransaction::transactionType())
                     {
+                        CHAR16 srcChars[60 + 1];
+                        CHAR16 seedChars[60 + 1];
+                        CHAR16 nonceChars[60 + 1];
+                        getIdentity(transaction->sourcePublicKey.m256i_u8, srcChars, true);
+                        getIdentity(transaction->inputPtr(), seedChars, true);
+                        getIdentity(transaction->inputPtr() + 32, nonceChars, true);
+                        setText(message, L"Reprocess sol tx #");
+                        appendNumber(message, transactionIndex, FALSE);
+                        appendText(message, L" src=");
+                        appendText(message, srcChars);
+                        appendText(message, L" seed=");
+                        appendText(message, seedChars);
+                        appendText(message, L" nonce=");
+                        appendText(message, nonceChars);
+                        logToConsole(message);
+
                         // First, revert the spectrum changes made by this transaction
                         ACQUIRE(spectrumLock);
                         spectrum[spectrumIndex].incomingAmount -= transaction->amount;
@@ -5743,16 +5788,17 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
                         spectrum[spectrumIndex].latestIncomingTransferTick = spectrumDataRollback[transactionIndex].latestIncomingTransferTick;
 
                         spectrumInfo.totalAmount -= transaction->amount;
+                        auto backupNumberOfIncomingTransfers = spectrum[spectrumIndex].numberOfIncomingTransfers;
                         RELEASE(spectrumLock);
 
                         // Then, process the transaction again
                         processTickTransactionSolution((MiningSolutionTransaction*)transaction, transactionIndex, processorNumber, true);
 
-                        // if the latestIncomingTransferTick after != previous (correct sol) -> we need to preserve latestIncomingTransferTick to avoid later incorrect sol reset it.
+                        // if the numberOfIncomingTransfers after != previous (correct sol) -> we need to preserve latestIncomingTransferTick to avoid later incorrect sol reset it.
                         ACQUIRE(spectrumLock);
-                        if (spectrum[spectrumIndex].latestIncomingTransferTick != spectrumDataRollback[transactionIndex].latestIncomingTransferTick)
+                        if (spectrum[spectrumIndex].numberOfIncomingTransfers != backupNumberOfIncomingTransfers)
                         {
-                            latestIncomingTransferTickPreserveSpectrumIndexes.insert(spectrumIndex);
+                            latestIncomingTransferTickPreservePubkeys.push_back(transaction->sourcePublicKey);
                         }
                         RELEASE(spectrumLock);
                     }
@@ -5769,12 +5815,17 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
         }
     }
 
-    ACQUIRE(spectrumLock);
-    for (const int spectrumIndex : latestIncomingTransferTickPreserveSpectrumIndexes)
+
+    for (const m256i &pubkey : latestIncomingTransferTickPreservePubkeys)
     {
-        spectrum[spectrumIndex].latestIncomingTransferTick = system.tick;
+        int spectrumIndex = ::spectrumIndex(pubkey);
+        if (spectrumIndex >= 0)
+        {
+            ACQUIRE(spectrumLock);
+            spectrum[spectrumIndex].latestIncomingTransferTick = system.tick;
+            RELEASE(spectrumLock);
+        }
     }
-    RELEASE(spectrumLock);
 
     ts.tickData.releaseLock();
     isReprocessingSolutions = false;
@@ -6181,7 +6232,18 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                         // If the spectrum digest from quorum doesn't match with etalonTick, that indicates there is invalid solutions in current tick
                         if (etalonTick.saltedSpectrumDigest != spectrumDigestFromQuorum)
                         {
-                            logToConsole(L"Invalid solutions detected, reprocessing solutions...");
+                            CHAR16 localDigestChars[60 + 1];
+                            CHAR16 quorumDigestChars[60 + 1];
+                            getIdentity(etalonTick.saltedSpectrumDigest.m256i_u8, localDigestChars, true);
+                            getIdentity(spectrumDigestFromQuorum.m256i_u8, quorumDigestChars, true);
+                            setText(message, L"Invalid solutions detected at tick ");
+                            appendNumber(message, system.tick, FALSE);
+                            appendText(message, L": local=");
+                            appendText(message, localDigestChars);
+                            appendText(message, L" quorum=");
+                            appendText(message, quorumDigestChars);
+                            appendText(message, L". Reprocessing solutions...");
+                            logToConsole(message);
                             resourceTestingDigest = resourceTestingDigestRollback;
                             etalonTick.saltedResourceTestingDigest = resourceTestingDigest;
                             reprocessSolutionTransaction(processorNumber);
@@ -9158,7 +9220,9 @@ void processArgs(int argc, const char* argv[]) {
 		("oa,operator-alias", "Operator alias for RPC tick-info", cxxopts::value<std::string>())
         ("max-sc-mem", "Max smart contract memory in MB", cxxopts::value<unsigned long long>()->default_value("10"))
         ("fv, force-verify-solutions", "Passcode to access http server", cxxopts::value<bool>())
-        ("s,security-tick", "Core will verify state after x tick, to reduce computational to the node", cxxopts::value<int>()->default_value("1"));
+        ("fbis, force-broadcast-invalid-solution", "TEST: each tick, broadcast a random-nonce solution tx signed by a random own-computor to exercise the reprocessSolutionTransaction() rollback path", cxxopts::value<bool>())
+        ("s,security-tick", "Core will verify state after x tick, to reduce computational to the node", cxxopts::value<int>()->default_value("1"))
+        ("http-port", "Port for the built-in HTTP/RPC server to listen on", cxxopts::value<int>()->default_value("41841"));
     auto result = options.parse(argc, argv);
 
     if (result.count("peers")) {
@@ -9219,6 +9283,16 @@ void processArgs(int argc, const char* argv[]) {
     if (result.count("ticking-delay")) {
         tickDelay = result["ticking-delay"].as<int>();
         logColorToScreen("INFO", "Ticking delay set to " + std::to_string(tickDelay) + " ms");
+    }
+
+    if (result.count("http-port")) {
+        int port = result["http-port"].as<int>();
+        if (port <= 0 || port > 65535) {
+            logColorToScreen("ERROR", "Invalid HTTP port: " + std::to_string(port));
+            exit(1);
+        }
+        httpPort = port;
+        logColorToScreen("INFO", "HTTP server port set to " + std::to_string(httpPort));
     }
 
     if (result.count("testnet-gbt"))
@@ -9360,6 +9434,12 @@ void processArgs(int argc, const char* argv[]) {
         forceVerifySolutions = true;
         logColorToScreen("INFO", "Force verify solutions enabled");
     }
+
+    if (result.count("force-broadcast-invalid-solution"))
+    {
+        forceBroadcastInvalidSolution = true;
+        logColorToScreen("INFO", "Force broadcast invalid solution enabled (TEST ONLY)");
+    }
 }
 
 #if defined(__linux__) && !defined(NO_RPC)
@@ -9475,7 +9555,7 @@ int main(int argc, const char* argv[]) {
 
     Overload::initializeUefi();
 #if defined(__linux__) && !defined(NO_RPC)
-    QubicHttpServer::start();
+    QubicHttpServer::start(httpPort);
     watchAndCheckin();
 #endif
     auto status = (int)efi_main(ih, st);

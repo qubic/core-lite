@@ -1,4 +1,20 @@
 cmake_minimum_required(VERSION 3.15)
+
+# Default toolchain — applied only when the user did not pass these on the
+# command line or via env (CC/CXX). Must run BEFORE project() so the project()
+# call's compiler detection sees our defaults.
+if(NOT CMAKE_C_COMPILER AND NOT DEFINED ENV{CC})
+    set(CMAKE_C_COMPILER clang)
+endif()
+if(NOT CMAKE_CXX_COMPILER AND NOT DEFINED ENV{CXX})
+    set(CMAKE_CXX_COMPILER clang++)
+endif()
+
+# Default build type — Release unless the user explicitly chose one.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 project(qubic CXX)
 
 # Set C++ standard
@@ -25,7 +41,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerSetup)
 
 # Build options
-option(BUILD_TESTS "Build the test suite" ON)
+option(BUILD_TESTS "Build the test suite" OFF)
 option(BUILD_BENCHMARK "Build the EFI benchmark application" OFF)
 option(BUILD_BINARY "Build the EFI application" ON)
 option(USE_SANITIZER "Build test with sanitizer support (clang only)" ON)

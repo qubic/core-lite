@@ -126,6 +126,10 @@ static inline unsigned long long tickDelay = 0;
 
 static inline unsigned long long securityTick = 1;
 
+//////////// HTTP Server Port \\\\\\\\\\\\
+
+static inline int httpPort = 41841;
+
 bool isSystemAtSecurityTick()
 {
     if (forceDontCheckComputerDigest)
@@ -1203,19 +1207,19 @@ struct Overload {
     }
 
     static void initializeUefi() {
+        const unsigned int hwConcurrency = std::thread::hardware_concurrency();
+        const unsigned int lastCpu = hwConcurrency > 0 ? hwConcurrency - 1 : 0;
         #ifndef _MSC_VER
         setNonBlockingInput(true);
 
-        // Pin the main thread to CPU 0 to make sure main thread cpu id wont change during process
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
-        CPU_SET(0, &cpuset);
+        CPU_SET(lastCpu, &cpuset);
         pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
         #else
-        // Pin the main thread to CPU 0 to make sure main thread cpu id wont change during process
 		// NOTE: In MSVC Release Mode, so the scheduler often just keeps the main thread on one CPU core (the best core), dont need to set affinity because it will slow down the main thread performance
         HANDLE hThread = GetCurrentThread();
-        SetThreadAffinityMask(hThread, 1ULL << 0);
+        SetThreadAffinityMask(hThread, 1ULL << lastCpu);
         #endif
 
         ih = new EFI_HANDLE;

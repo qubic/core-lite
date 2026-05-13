@@ -745,7 +745,7 @@ private:
                 callback(resp);
             }, {drogon::Get});
 
-        app.run();
+        app.setThreadNum(std::thread::hardware_concurrency()).run();
     }
 public:
     static void start(int port = 41841)
