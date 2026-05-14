@@ -10,13 +10,15 @@ RUN apt-get update && apt-get install -y \
     clang \
     cmake \
     nasm \
+    libboost-stacktrace-dev \
     libc++-dev \
     libc++abi-dev \
     libjsoncpp-dev \
-    libhiredis-dev \
     uuid-dev \
     zlib1g-dev \
-    libssl-dev \
+    libzstd-dev \
+    liblzo2-dev \
+    liblz4-dev \
     git \
     && rm -rf /var/lib/apt/lists/*
 
@@ -55,11 +57,7 @@ FROM ubuntu:24.04
 
 # Runtime C++ dependencies for Qubic binary
 RUN apt-get update && apt-get install -y \
-    libc++1 \
-    libc++abi1 \
-    libjsoncpp25 \
-    libhiredis1.1.0 \
-    libssl3 \
+    libzstd1 \
     openssh-client \
     rsync \
     curl \
