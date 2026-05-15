@@ -370,8 +370,16 @@ public:
     {
 #if ENABLED_LOGGING
         if (isPausing) return;
+        // A log must be paired with a transaction: tx.addLogId() returns false
+        // when currentTick / currentTxId are not in a valid range (typically
+        // because the call happened between logger.reset() and the first
+        // registerNewTx() of the epoch — e.g. testnet asset-bootstrap code).
+        // Reject the event entirely so logId stays densely sequential.
+        if (!tx.addLogId())
+        {
+            return;
+        }
         char buffer[LOG_HEADER_SIZE];
-        tx.addLogId();
         logBuf.set(logId, logBufferTail, LOG_HEADER_SIZE + messageSize);
         *((unsigned short*)(buffer)) = system.epoch;
         *((unsigned int*)(buffer + 2)) = system.tick;
@@ -540,27 +548,35 @@ public:
             }
         }
 
-        static void addLogId()
+        // Returns true if the log was successfully attributed to the current
+        // (tick, txId); false otherwise. A false return means the caller (logMessage)
+        // must drop the event entirely — logs without a tx association break the
+        // invariant that logIds are densely sequential from 0 and would create
+        // "orphan" entries that cannot be looked up via mapLogIdToBufferIndex.
+        static bool addLogId()
         {
-            unsigned long long offsetTick = currentTick - tickBegin;
-            ASSERT(offsetTick < MAX_NUMBER_OF_TICKS_PER_EPOCH);
-            ASSERT(currentTxId < LOG_TX_PER_TICK);
-            if (offsetTick < MAX_NUMBER_OF_TICKS_PER_EPOCH && currentTxId < LOG_TX_PER_TICK)
+            // Both fields are unsigned int; check ordering explicitly so the
+            // intent is obvious to readers (no reliance on unsigned-wrap
+            // semantics to land out of range).
+            if (currentTick < tickBegin) return false;
+            const unsigned long long offsetTick =
+                (unsigned long long)currentTick - (unsigned long long)tickBegin;
+            if (offsetTick >= MAX_NUMBER_OF_TICKS_PER_EPOCH) return false;
+            if (currentTxId >= LOG_TX_PER_TICK) return false;
+
+            auto& startIndex = currentTickTxToId.fromLogId[currentTxId];
+            auto& length = currentTickTxToId.length[currentTxId];
+            logIdToTxIdMap[logId] = currentTxId;
+            if (startIndex == -1)
             {
-                auto& startIndex = currentTickTxToId.fromLogId[currentTxId];
-                auto& length = currentTickTxToId.length[currentTxId];
-                logIdToTxIdMap[logId] = currentTxId;
-                if (startIndex == -1)
-                {
-                    startIndex = logId;
-                    length = 1;
-                }
-                else
-                {
-                    ASSERT(startIndex != -1);
-                    length++;
-                }
+                startIndex = logId;
+                length = 1;
             }
+            else
+            {
+                length++;
+            }
+            return true;
         }
 
         static void removeReturnDepositLogOfSolutionTransaction(unsigned int txId)

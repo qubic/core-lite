@@ -1311,13 +1311,12 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
                 catch (...) { emitEmpty(); return; }
             }
 
-            // Walk logBuffer sequentially. The logId-keyed lookup via
-            // qLogger::logBuf.getBlobInfo() is unreliable when "orphan" log events fire
-            // before the first registerNewTx of the epoch (e.g. contract INITIALIZE
-            // phase logs) because the stored BlobInfo.startIndex is offset by the orphan
-            // byte count while logBuffer itself only contains committed bytes starting
-            // at offset 0. Iterating logBuffer in order avoids that index entirely;
-            // event boundaries are encoded by the per-event 26-byte header + msgSize.
+            // Walk logBuffer sequentially. Each committed event is [26-byte header]
+            // [payload of msgSize bytes] laid out contiguously; we can iterate by
+            // adding header_size + msgSize each step. The headers carry tick + logId
+            // so we can apply cheap pre-filters (tickNumber/logType/logId) before
+            // reading the payload, then resolve (tick, txId) by searching the per-tick
+            // fromLogId/length ranges in qLogger::mapTxToLogId for the embedded logId.
             unsigned long long totalMatched = 0;
             const unsigned long long pageEndExclusive = (unsigned long long)offset + (unsigned long long)size;
             std::vector<Json::Value> page;
