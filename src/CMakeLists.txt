@@ -65,18 +65,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(fmt)
 
-# Disable Blosc2 internal components that cause linker errors
-set(BUILD_EXAMPLES OFF CACHE BOOL "Disable Blosc2 examples" FORCE)
-set(BUILD_TESTS OFF CACHE BOOL "Disable Blosc2 tests" FORCE)
-set(BUILD_BENCHMARKS OFF CACHE BOOL "Disable Blosc2 benchmarks" FORCE)
-FetchContent_Declare(
-        blosc2
-        GIT_REPOSITORY https://github.com/Blosc/c-blosc2.git
-        GIT_TAG        v2.15.1
-)
-FetchContent_MakeAvailable(blosc2)
-include_directories(${blosc2_SOURCE_DIR}/include)
-
 set(LIBBACKTRACE_PREFIX ${CMAKE_BINARY_DIR}/libbacktrace)
 set(LIBBACKTRACE_BINARY_DIR ${LIBBACKTRACE_PREFIX}/src/libbacktrace_project-build)
 set(LIBBACKTRACE_STATIC_LIB ${LIBBACKTRACE_BINARY_DIR}/.libs/libbacktrace.a)
@@ -178,11 +166,12 @@ target_link_libraries(Qubic
         platform_common
         platform_efi
         -Wl,-Bstatic
-        jsoncpp_static drogon fmt::fmt Blosc2::blosc2_static backtrace_static
+        jsoncpp_static drogon fmt::fmt backtrace_static
         -Wl,-Bdynamic
         Threads::Threads
         dl
         z
+        zstd
         rt
         m
 )

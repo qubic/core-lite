@@ -109,3 +109,15 @@ alerting:
   webhook_url: ""
   rate_limit_seconds: 300
   include_node_info: true
+
+# Post-epoch-transition wipe window.  On non-seamless transitions the
+# network restarts from scratch with a new initial tick, so any node
+# still carrying last-epoch state fails to sync.  Inside this weekly
+# window we wipe the data dir and re-sync from a fresh snapshot.
+wipe_window:
+  enabled: true
+  weekday_utc: 2                    # 0=Mon … 6=Sun; Wednesday = 2
+  hour_utc: 12
+  minute_utc: 10
+  duration_hours: 4
+  max_wipes_per_window: 2           # cap retries to avoid wipe-loops

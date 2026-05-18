@@ -10,9 +10,9 @@ if(NOT CMAKE_CXX_COMPILER AND NOT DEFINED ENV{CXX})
     set(CMAKE_CXX_COMPILER clang++)
 endif()
 
-# Default build type — Release unless the user explicitly chose one.
+# Default build type — RelWithDebInfo unless the user explicitly chose one.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
 endif()
 
 project(qubic CXX)

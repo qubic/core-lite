@@ -26,6 +26,7 @@ from app.snapshot_cycle import SnapshotCycle
 from app.state_manager import StateManager
 from app.uploaders import create_uploader
 from app.watchdog import Watchdog
+from app.wipe_window import is_in_window
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,13 @@ class Orchestrator:
                 ):
                     await self._wait_for_compatible_version(epoch_info)
                     return  # Shutdown requested while waiting
+
+            # If a newer binary arrived (via Watchtower etc.) and its
+            # compiled epoch is ahead of the local state, wipe everything
+            # so we sync fresh.  This covers the non-seamless epoch
+            # transition flow where the new image is pulled at the same
+            # moment local state becomes stale.
+            self._wipe_if_compiled_epoch_ahead()
 
             await self._ensure_state_files(epoch_info)
 
@@ -422,6 +430,50 @@ class Orchestrator:
             except asyncio.TimeoutError:
                 pass
 
+    def _wipe_if_compiled_epoch_ahead(self) -> None:
+        """Startup-time wipe when the binary expects a newer epoch than local state.
+
+        Triggered when the container image was updated (e.g. by Watchtower
+        following a non-seamless network restart) and the data volume
+        still carries last-epoch state.  Compares ``epoch.txt`` (baked at
+        build time) with the highest epoch found on disk.
+        """
+        compiled = self._epoch_service.get_compiled_epoch()
+        if compiled is None:
+            return
+        local = self._state_manager.get_local_epoch()
+        if local is None or compiled <= local:
+            return
+        logger.warning(
+            f"Compiled epoch {compiled} > local epoch {local}; "
+            "wiping data dir for fresh sync"
+        )
+        self._state_manager.wipe_data_dir()
+        # Re-install the binary that wipe_data_dir() just removed.
+        self._install_binary()
+
+    async def _handle_wipe_and_restart(self) -> None:
+        """Stop the node, nuke the data dir, re-sync, and restart.
+
+        Called by the watchdog when the wipe-window trigger fires
+        (post-Wed-12:10 UTC, node behind ``api.initialTick``).  Goes
+        through the same startup steps the orchestrator runs after a
+        cold boot, minus the binary version check (we already passed
+        that to get here).
+        """
+        logger.warning("Wipe-window recovery: stopping node and wiping data dir")
+        await self._process_manager.stop()
+        self._state_manager.wipe_data_dir()
+        self._install_binary()
+
+        epoch_info = await self._discover_epoch()
+        await self._ensure_state_files(epoch_info)
+
+        qubic_args = self._build_qubic_args(epoch_info)
+        self._watchdog._qubic_args = qubic_args
+        await self._process_manager.start(qubic_args)
+        await self._wait_for_node_api()
+
     async def _handle_state_incompatible(self) -> None:
         """Recovery handler for STATE_INCOMPATIBLE.
 
@@ -502,6 +554,8 @@ class Orchestrator:
             epoch_service=self._epoch_service,
             local_version=self._local_version,
             on_state_incompatible=self._handle_state_incompatible,
+            wipe_window_config=self._config.wipe_window,
+            on_wipe_window_recovery=self._handle_wipe_and_restart,
         )
         self._tasks.append(
             asyncio.create_task(

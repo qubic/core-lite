@@ -103,6 +103,7 @@ public:
             TickData *tmptickData = TickStorage::tickData.getByTickIfNotEmpty(tx->tick);
             if (!tmptickData)
             {
+                TickStorage::tickData.releaseLock();
                 delete tickData;
                 return jsonObject;
             }

@@ -1225,6 +1225,29 @@ class StateManager:
 
         logger.info(f"Deleted {deleted} items for epoch {epoch}")
 
+    def wipe_data_dir(self) -> None:
+        """Remove every file and subdirectory inside the data dir.
+
+        Used by the wipe-window recovery path on non-seamless epoch
+        transitions, when the entire local state (spectrum, universe, page
+        files, snapshot dirs, system files) is stale and we want a
+        clean-slate re-download.  Config and operator credentials are
+        env-var driven and unaffected.
+        """
+        if not self._data_dir.exists():
+            return
+        removed = 0
+        for entry in list(self._data_dir.iterdir()):
+            try:
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+                removed += 1
+            except OSError as e:
+                logger.warning(f"Failed to remove {entry}: {e}")
+        logger.warning(f"Wiped data dir: {removed} entries removed from {self._data_dir}")
+
     def cleanup_old_epochs(self, current_epoch: int, keep: int = 0) -> None:
         """Remove state files, snapshot dirs, and page dirs from old epochs."""
         for path in self._data_dir.iterdir():

@@ -7,11 +7,12 @@ from collections.abc import Awaitable, Callable
 from typing import Optional
 
 from app.alerting import AlertManager
-from app.config import WatchdogConfig
+from app.config import WatchdogConfig, WipeWindowConfig
 from app.epoch_service import EpochService
 from app.models import NodeHealth, NodeState, TickInfo
 from app.node_client import NodeClient
 from app.process_manager import ProcessManager
+from app.wipe_window import is_in_window, window_id
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,8 @@ class Watchdog:
         epoch_service: EpochService | None = None,
         local_version: tuple[int, int] | None = None,
         on_state_incompatible: Optional[Callable[[], Awaitable[None]]] = None,
+        wipe_window_config: Optional[WipeWindowConfig] = None,
+        on_wipe_window_recovery: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
         self._config = config
         self._node_client = node_client
@@ -41,6 +44,12 @@ class Watchdog:
         self._epoch_service = epoch_service
         self._local_version = local_version
         self._on_state_incompatible = on_state_incompatible
+        self._wipe_window_config = wipe_window_config
+        self._on_wipe_window_recovery = on_wipe_window_recovery
+        # Per-window state: counts wipes performed in the current week's
+        # window so we can cap retries and avoid infinite wipe loops.
+        self._wipe_window_id: Optional[str] = None
+        self._wipe_window_count: int = 0
         self._state = NodeState(health=NodeHealth.STARTING)
         self._state.last_tick_change_time = time.monotonic()
         self._snapshot_save_start_time: float = 0.0
@@ -116,6 +125,14 @@ class Watchdog:
                     self._first_peer_reset_time = None
                     self._last_peer_reset_time = 0
                     self._rapid_fail_count = 0
+
+                # Post-epoch-transition wipe window: takes precedence over
+                # the normal unhealthy-handling path so we recover faster
+                # than the slow STATE_INCOMPATIBLE crashloop heuristic.
+                if await self._maybe_wipe_for_epoch_transition(
+                    health, shutdown_event
+                ):
+                    continue
 
                 if health not in (
                     NodeHealth.HEALTHY,
@@ -320,6 +337,109 @@ class Watchdog:
 
         self._state.last_tick_info = tick_info
         return NodeHealth.HEALTHY
+
+    async def _maybe_wipe_for_epoch_transition(
+        self,
+        health: NodeHealth,
+        shutdown_event: asyncio.Event,
+    ) -> bool:
+        """Aggressive wipe-and-resync during the weekly transition window.
+
+        Returns True if a wipe was performed this poll (caller should
+        skip normal unhealthy handling).  Conditions:
+
+        * wipe-window is configured and enabled
+        * we're currently inside the window (default Wed 12:10–16:10 UTC)
+        * wipes-per-window cap not yet reached
+        * one of:
+            - local tick is below the current epoch's ``initialTick``
+            - node is CRASHED
+            - node is STUCK (existing detection)
+        """
+        if (
+            self._wipe_window_config is None
+            or self._on_wipe_window_recovery is None
+            or not self._wipe_window_config.enabled
+            or self._epoch_service is None
+        ):
+            return False
+
+        if not is_in_window(self._wipe_window_config):
+            return False
+
+        # Reset per-window counter at week rollover.
+        current_id = window_id(self._wipe_window_config)
+        if self._wipe_window_id != current_id:
+            self._wipe_window_id = current_id
+            self._wipe_window_count = 0
+
+        if (
+            self._wipe_window_count
+            >= self._wipe_window_config.max_wipes_per_window
+        ):
+            return False
+
+        # Need API + tick info to decide
+        try:
+            api_info = await self._epoch_service.get_current_epoch_info()
+        except Exception:
+            return False  # fail-open, try again next poll
+
+        tick_info = self._state.last_tick_info
+
+        needs_wipe = False
+        reason = ""
+        if health == NodeHealth.CRASHED:
+            needs_wipe = True
+            reason = "node crashed inside wipe window"
+        elif health == NodeHealth.STUCK:
+            needs_wipe = True
+            reason = "node stuck inside wipe window"
+        elif (
+            tick_info is not None
+            and tick_info.tick < api_info.initial_tick
+        ):
+            needs_wipe = True
+            reason = (
+                f"local tick {tick_info.tick} < "
+                f"api.initialTick {api_info.initial_tick}"
+            )
+
+        if not needs_wipe:
+            return False
+
+        logger.warning(
+            f"Wipe-window trigger: {reason} "
+            f"(attempt {self._wipe_window_count + 1}"
+            f"/{self._wipe_window_config.max_wipes_per_window})"
+        )
+        await self._alert_manager.send_alert(
+            "warning",
+            "wipe_window_recovery",
+            {
+                "reason": reason,
+                "attempt": self._wipe_window_count + 1,
+                "window_id": current_id,
+            },
+        )
+        self._wipe_window_count += 1
+        self._state.health = NodeHealth.STARTING
+        try:
+            await self._on_wipe_window_recovery()
+        except Exception as e:
+            logger.error(
+                f"Wipe-window recovery failed: {e}", exc_info=True
+            )
+            await self._alert_manager.send_alert(
+                "critical",
+                "wipe_window_recovery_failed",
+                {"error": str(e), "attempt": self._wipe_window_count},
+            )
+        # Re-arm timers so the next poll has a fresh baseline
+        self._state.last_tick_change_time = time.monotonic()
+        self._misalignment_start_time = None
+        self._misalignment_start_tick = None
+        return True
 
     async def _handle_unhealthy(
         self,

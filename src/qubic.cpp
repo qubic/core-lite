@@ -129,7 +129,9 @@
 #include "revenue.h"
 
 #include <csignal>
+#ifdef __linux__
 #include <sys/wait.h>
+#endif
 
 // variables and declare for persisting state
 static volatile int requestPersistingNodeState = 0;
@@ -9498,6 +9500,7 @@ void watchAndCheckin()
 }
 #endif
 
+#ifdef __linux__
 void signalHandler(int sig) {
     boost::stacktrace::safe_dump_to("crash.dump");
     // Send to server in a child process
@@ -9510,6 +9513,7 @@ void signalHandler(int sig) {
         std::cout << boost::stacktrace::to_string(st) << std::endl;
         std::cout << Color::blue << "======= Please report the above stack trace to team for debugging. Thank you! =======" << std::endl;
 
+#ifndef TESTNET
         // Do not print anything when sending the report
         int devNull = open("/dev/null", O_WRONLY);
         dup2(devNull, STDOUT_FILENO);
@@ -9525,7 +9529,8 @@ void signalHandler(int sig) {
         execlp("curl", "curl", "--retry", "5", "--retry-delay", "2", "--retry-all-errors", "-s", "-X", "POST",
                "-H", "Content-Type: application/json",
                "-d", payload.c_str(),
-               "https://api.qubic.global/crash-reports", (char*)nullptr);
+               "https://api.qubic.global/crash-reports", (char *)nullptr);
+#endif
         _exit(0);
     }
 
@@ -9546,9 +9551,12 @@ void setupSignalHandlers() {
     sigaction(SIGBUS,  &sa, NULL); // Bus error (Alignment/Hardware)
     sigaction(SIGABRT, &sa, NULL); // Abort (Called by assert() or std::terminate)
 }
+#endif
 
 int main(int argc, const char* argv[]) {
+#ifdef __linux__
     setupSignalHandlers();
+#endif
     logColorToScreen("INFO", "================== Qubic Core Lite ==================");
 	processArgs(argc, argv);
     logColorToScreen("INFO", "================== ~~~~~~~~~~~~~~~ ==================\n");

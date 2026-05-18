@@ -136,6 +136,24 @@ class LocalSnapshotConfig(BaseModel):
     interval_seconds: int = 3600     # save local snapshot every hour (like pressing F8)
 
 
+class WipeWindowConfig(BaseModel):
+    """Aggressive recovery during the expected non-seamless epoch transition.
+
+    Window opens weekly at ``weekday_utc hour_utc:minute_utc`` UTC (default
+    Wed 12:10 UTC) and stays open for ``duration_hours``.  Inside the
+    window, the watchdog wipes the entire data dir and re-syncs whenever
+    the local node falls behind the current epoch's ``initialTick``,
+    crashes, or stays stuck.
+    """
+
+    enabled: bool = True
+    weekday_utc: int = 2             # 0=Mon … 6=Sun; Wednesday = 2
+    hour_utc: int = 12
+    minute_utc: int = 10
+    duration_hours: int = 4
+    max_wipes_per_window: int = 2    # safety cap against wipe-loops
+
+
 class AlertingConfig(BaseModel):
     enabled: bool = False
     webhook_url: str = ""
@@ -205,6 +223,7 @@ class OrchestratorConfig(BaseSettings):
     alerting: AlertingConfig = Field(default_factory=AlertingConfig)
     cleanup: CleanupConfig = Field(default_factory=CleanupConfig)
     local_snapshot: LocalSnapshotConfig = Field(default_factory=LocalSnapshotConfig)
+    wipe_window: WipeWindowConfig = Field(default_factory=WipeWindowConfig)
 
     def get_peers_list(self) -> list[str]:
         if not self.peers:
