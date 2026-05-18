@@ -354,6 +354,7 @@ static long long load(const CHAR16* fileName, unsigned long long totalSize, unsi
         return -1;
     }
 
+#ifdef __linux__
     if (useCompress)
     {
         auto decompressedData = Zipper::unzip(buffer, sizeShouldRead);
@@ -365,6 +366,7 @@ static long long load(const CHAR16* fileName, unsigned long long totalSize, unsi
         }
         copyMem(buffer, decompressedData.data(), totalSize);
     } else
+#endif
     {
         if (sizeShouldRead != totalSize)
         {
@@ -458,6 +460,7 @@ static long long save(const CHAR16* fileName, unsigned long long totalSize, cons
         return -1;
     }
 
+#ifdef __linux__
     std::vector<unsigned char> compressedData;
     if (useCompress)
     {
@@ -465,6 +468,7 @@ static long long save(const CHAR16* fileName, unsigned long long totalSize, cons
         buffer = compressedData.data();
         totalSize = compressedData.size();
     }
+#endif
 
     if (fwrite(buffer, 1, totalSize, file) != totalSize)
     {

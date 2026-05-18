@@ -15,18 +15,6 @@ FetchContent_Declare(
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
-# Disable Blosc2 internal components that cause linker errors
-set(BUILD_EXAMPLES OFF CACHE BOOL "Disable Blosc2 examples" FORCE)
-set(BUILD_TESTS OFF CACHE BOOL "Disable Blosc2 tests" FORCE)
-set(BUILD_BENCHMARKS OFF CACHE BOOL "Disable Blosc2 benchmarks" FORCE)
-FetchContent_Declare(
-		blosc2
-		GIT_REPOSITORY https://github.com/Blosc/c-blosc2.git
-		GIT_TAG        v2.15.1
-)
-FetchContent_MakeAvailable(blosc2)
-include_directories(${blosc2_SOURCE_DIR}/include)
-
 get_filename_component(PROJECT_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../lib/platform_common)

@@ -53,6 +53,21 @@ if(IS_WINDOWS)
     endif()
 endif()
 
+# Blosc2 is needed by both src/ and test/ (via src/extensions/zipper.h pulled in by
+# src/platform/file_io.h and src/platform/virtual_memory.h). Declare it here so
+# both subdirectories see the target regardless of which is added first.
+include(FetchContent)
+set(BUILD_EXAMPLES OFF CACHE BOOL "Disable Blosc2 examples" FORCE)
+set(BUILD_TESTS_BLOSC OFF CACHE BOOL "Disable Blosc2 tests" FORCE)
+set(BUILD_BENCHMARKS OFF CACHE BOOL "Disable Blosc2 benchmarks" FORCE)
+FetchContent_Declare(
+        blosc2
+        GIT_REPOSITORY https://github.com/Blosc/c-blosc2.git
+        GIT_TAG        v2.15.1
+)
+FetchContent_MakeAvailable(blosc2)
+include_directories(${blosc2_SOURCE_DIR}/include)
+
 # Always include platform_common as it's needed for both application and tests
 add_subdirectory(lib/platform_common)
 
