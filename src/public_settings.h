@@ -48,7 +48,7 @@
 #define TICK_DURATION_FOR_ALLOCATION_MS 350
 #define TRANSACTION_SPARSENESS 3
 // Number of ticks that are stored in the pending txs pool. This also defines how many ticks in advance a tx can be registered.
-#define PENDING_TXS_POOL_NUM_TICKS (1000 * 60 * 10ULL / TICK_DURATION_FOR_ALLOCATION_MS) // 10 minutes
+#define PENDING_TXS_POOL_NUM_TICKS (1000 * 60 * 3ULL / TICK_DURATION_FOR_ALLOCATION_MS) // 3 minutes
 #endif
 
 #ifdef TESTNET
