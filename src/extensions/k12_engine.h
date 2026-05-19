@@ -227,9 +227,17 @@ public:
     unsigned int contractIndex;
     bool isUffdRegistered = false;
     std::mutex faultLock;
+    int diskFd = -1;
+    int memfdFd = -1;
 
     std::vector<bool> isChunkLoadedInMemoryMap;
     unsigned char tmpBuffer[K12_chunkSize];
+
+    // Thread-local handoff for the memfd fd allocated inside allocateState().
+    // The base K12Engine ctor receives only the buffer pointer, so we stash
+    // the fd here for the derived ctor body to pick up. Serial construction
+    // in qubic.cpp:7038 keeps this race-free; the thread_local guards anyway.
+    static inline thread_local int lastMemfdFd = -1;
 
     static void* allocateState(size_t size) {
         size = alignToPageSize(size);
@@ -241,9 +249,12 @@ public:
         }
         void* buf = mmap(nullptr, size, PROT_READ | PROT_WRITE,
                          MAP_SHARED, fd, 0);
-        if (buf == MAP_FAILED) throw std::runtime_error("Error: mmap failed | Line: " + std::to_string(__LINE__));
+        if (buf == MAP_FAILED) {
+            close(fd);
+            throw std::runtime_error("Error: mmap failed | Line: " + std::to_string(__LINE__));
+        }
         memset(buf, 0, size);
-        close(fd);
+        lastMemfdFd = fd; // keep the fd open; derived ctor grabs it for copy_file_range
         return buf;
     }
 
@@ -324,6 +335,8 @@ public:
     ContractStateEngine(unsigned char **state, size_t stateSize, unsigned int contractIndex)
         : K12Engine((unsigned char*)allocateState(stateSize), stateSize)
     {
+        memfdFd = lastMemfdFd; // grab the fd allocateState stashed for us
+        lastMemfdFd = -1;
         *state = _state;
         this->contractIndex = contractIndex;
         this->nonPaddedSize = stateSize;
@@ -334,10 +347,21 @@ public:
             isChunkLoadedInMemoryMap[i] = true; // memset in allocateState so all pages are in memory
         }
 
-        // ensure data pages directory exists
-        CHAR16 dir[MAX_IO_NAME_LEN] = {};
-        getDirectory(dir);
-        createDir(dir);
+        // ensure base directory exists
+        createDir(BASE_DIR);
+
+        // open single sparse backing file for this contract; one inode per contract,
+        // chunk IO via pread/pwrite at offset = chunkIndex * K12_chunkSize
+        char path[64];
+        std::snprintf(path, sizeof(path), "contract_states/contract_%04u.bin", contractIndex);
+        diskFd = open(path, O_RDWR | O_CREAT, 0600);
+        if (diskFd == -1) {
+            throw std::runtime_error("Error: open contract state file failed: " + std::string(path));
+        }
+        if (ftruncate(diskFd, paddedSize) == -1) {
+            close(diskFd);
+            throw std::runtime_error("Error: ftruncate failed: " + std::string(path));
+        }
     }
 
     bool loadChunkFromDisk(unsigned int chunkIndex, unsigned char *destBuffer, size_t chunkSize)
@@ -345,46 +369,34 @@ public:
         // lock IO for this contract
         std::lock_guard<std::mutex> lock(ioLocks[contractIndex]);
 
-        CHAR16 dir[MAX_IO_NAME_LEN] = {};
-        getDirectory(dir);
-
-        CHAR16 pageId[MAX_IO_NAME_LEN] = {};
-        getPageId(pageId, chunkIndex);
-
-        long long fileSize = getFileSize(pageId, dir);
-        if (fileSize != K12_chunkSize && !(chunkIndex == maxChunks - 1 && fileSize == (paddedSize % K12_chunkSize)))
+        size_t expectedSize = K12_chunkSize;
+        if (paddedSize % K12_chunkSize != 0 && chunkIndex == maxChunks - 1)
         {
-            // file does not exist or size mismatch
+            expectedSize = paddedSize % K12_chunkSize;
+        }
+        if (chunkSize != expectedSize)
+        {
             std::cout << "Contract " << contractIndex << ": Chunk " << chunkIndex
-                      << " file size mismatch or does not exist. Expected size: "
-                      << ((chunkIndex == maxChunks - 1) ? (paddedSize % K12_chunkSize) : K12_chunkSize)
-                      << ", actual size: " << fileSize << "\n";
+                      << " requested size mismatch. Requested: " << chunkSize
+                      << ", expected: " << expectedSize << "\n";
             return false;
         }
 
-        if (fileSize != chunkSize)
+        off_t offset = (off_t)chunkIndex * (off_t)K12_chunkSize;
+        ssize_t n = pread(diskFd, destBuffer, chunkSize, offset);
+        if (n != (ssize_t)chunkSize)
         {
-            std::cout << "Contract " << contractIndex << ": Chunk " << chunkIndex
-                      << " requested size mismatch. Requested size: "
-                      << chunkSize << ", actual size: " << fileSize << "\n";
+            std::cout << "Contract " << contractIndex << ": pread chunk " << chunkIndex
+                      << " failed, got " << n << " expected " << chunkSize << "\n";
             return false;
         }
-
-        auto readSize = load(pageId, fileSize, destBuffer, dir);
         isChunkLoadedInMemoryMap[chunkIndex] = true;
-
-        return readSize == fileSize;
+        return true;
     }
 
     bool saveChunkToDisk(unsigned int chunkIndex)
     {
         std::lock_guard<std::mutex> lock(ioLocks[contractIndex]);
-
-        CHAR16 dir[MAX_IO_NAME_LEN] = {};
-        getDirectory(dir);
-
-        CHAR16 pageId[MAX_IO_NAME_LEN] = {};
-        getPageId(pageId, chunkIndex);
 
         size_t offset = chunkIndex * (size_t)K12_chunkSize;
         size_t chunkSize = K12_chunkSize;
@@ -393,11 +405,32 @@ public:
             chunkSize = paddedSize % K12_chunkSize;
         }
 
-        auto writeSize = save(pageId, chunkSize, _state + offset, dir);
+        // Read via the memfd file descriptor (not the UFFD-monitored mmap) so
+        // sparse / unfaulted pages return zeros instead of EFAULT, then pwrite
+        // to the disk file. Both sides use a single fd each, no per-chunk
+        // fopen/fclose overhead.
+        ssize_t r = pread(memfdFd, tmpBuffer, chunkSize, (off_t)offset);
+        bool success = (r == (ssize_t)chunkSize);
+        if (!success)
+        {
+            std::cout << "Contract " << contractIndex << ": pread memfd chunk " << chunkIndex
+                      << " failed, got " << r << " expected " << chunkSize
+                      << " errno=" << errno << " (" << strerror(errno) << ")\n";
+        }
+        else
+        {
+            ssize_t w = pwrite(diskFd, tmpBuffer, chunkSize, (off_t)offset);
+            success = (w == (ssize_t)chunkSize);
+            if (!success)
+            {
+                std::cout << "Contract " << contractIndex << ": pwrite disk chunk " << chunkIndex
+                          << " failed, got " << w << " expected " << chunkSize
+                          << " errno=" << errno << " (" << strerror(errno) << ")\n";
+            }
+        }
         isChunkLoadedInMemoryMap[chunkIndex] = false;
 
-        bool success = writeSize == chunkSize;
-        // release the memory of the chunk (but keep the page mapped)
+        // release the memfd page back to the kernel
         if (madvise(_state + offset, chunkSize, MADV_REMOVE) == -1)
         {
             std::cout << "Contract " << contractIndex << ": madvise failed for chunk " << chunkIndex << "\n";
@@ -689,36 +722,4 @@ public:
         return res;
     }
 
-private:
-    void getDirectory(CHAR16 outDirectory[MAX_IO_NAME_LEN])
-    {
-        CHAR16 contractAssetName[MAX_IO_NAME_LEN] = {};
-        string_to_wchar_t(contractDescriptions[contractIndex].assetName, contractAssetName);
-
-        setText(outDirectory, BASE_DIR);
-        if (contractIndex != 0)
-        {
-            appendText(outDirectory, contractAssetName);
-        } else
-        {
-            appendText(outDirectory, "Contract0State");
-        }
-    }
-
-    void getPageId(CHAR16 pageName[MAX_IO_NAME_LEN], unsigned int chunkIndex)
-    {
-        struct
-        {
-            unsigned int contractIndex;
-            unsigned int chunkIndex;
-        } pageIdStruct;
-
-        pageIdStruct.contractIndex = contractIndex;
-        pageIdStruct.chunkIndex = chunkIndex;
-
-        m256i digest{};
-        KangarooTwelve(&pageIdStruct, sizeof(pageIdStruct), digest.m256i_u8, sizeof(digest));
-        getIdentity(digest.m256i_u8, pageName, true);
-        setMem(pageName + 10, 8, 0);
-    }
 };

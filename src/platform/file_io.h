@@ -344,12 +344,13 @@ static long long load(const CHAR16* fileName, unsigned long long totalSize, unsi
         return -1;
     }
     auto sizeShouldRead = getFileSize(const_cast<CHAR16*>(fileName), const_cast<CHAR16*>(directory));
-    if (fread(buffer, 1, sizeShouldRead, file) != sizeShouldRead)
+    int readSize = fread(buffer, 1, sizeShouldRead, file);
+    if (readSize != sizeShouldRead)
     {
 #ifdef _MSC_VER
         wprintf(L"Error reading %llu bytes from %s!\n", totalSize, fileName);
 #else
-        print_wstr(L"Error reading %llu bytes from %s!\n", totalSize, wchar_to_string((fileName)).c_str());
+        print_wstr(L"Error reading %llu bytes from %s! | expected %llu - got %llu | isUseCompress %d \n", totalSize, wchar_to_string((fileName)).c_str(), sizeShouldRead, readSize, useCompress);
 #endif
         return -1;
     }
