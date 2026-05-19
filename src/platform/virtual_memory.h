@@ -9,11 +9,7 @@
 
 #include "four_q.h"
 #include "kangaroo_twelve.h"
-
-#ifdef NO_UEFI
-#include <chrono>
-#include <thread>
-#endif
+#include <lib/platform_common/sleep.h>
 
 template <class T>
 inline constexpr const T& max(const T& left, const T& right)
@@ -29,16 +25,7 @@ inline constexpr const T& min(const T& left, const T& right)
 
 // bounded retry: 100ms, 200ms, 400ms, 800ms, 1600ms (~3.1s max)
 static constexpr int SWAPVM_IO_MAX_ATTEMPTS = 5;
-static constexpr unsigned long long SWAPVM_IO_INITIAL_DELAY_MS = 100ULL;
-
-static inline void swapvmRetrySleep(unsigned long long delayMs)
-{
-#ifdef NO_UEFI
-    std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
-#else
-    bs->Stall(delayMs * 1000ULL);
-#endif
-}
+static constexpr unsigned int SWAPVM_IO_INITIAL_DELAY_MS = 100;
 
 // an util to use disk as RAM to reduce hardware requirement for qubic core node
 // this VirtualMemory doesn't (yet) support amend operation. That means data stay persisted once they are written
@@ -742,7 +729,7 @@ private:
 
         // bounded retry on save() failure
         unsigned long long sz = 0;
-        unsigned long long delayMs = SWAPVM_IO_INITIAL_DELAY_MS;
+        unsigned int delayMs = SWAPVM_IO_INITIAL_DELAY_MS;
         for (int attempt = 0; attempt < SWAPVM_IO_MAX_ATTEMPTS; attempt++)
         {
             sz = save(pageName, pageSize, (unsigned char*)pageBuffer, pageDir);
@@ -759,7 +746,7 @@ private:
 
             if (attempt + 1 < SWAPVM_IO_MAX_ATTEMPTS)
             {
-                swapvmRetrySleep(delayMs);
+                sleepMilliseconds(delayMs);
                 delayMs *= 2;
             }
         }
@@ -825,7 +812,7 @@ private:
         if (isPageWrittenToDisk[pageId])
         {
             // bounded retry on load() failure
-            unsigned long long delayMs = SWAPVM_IO_INITIAL_DELAY_MS;
+            unsigned int delayMs = SWAPVM_IO_INITIAL_DELAY_MS;
             for (int attempt = 0; attempt < SWAPVM_IO_MAX_ATTEMPTS; attempt++)
             {
                 sz = load(pageName, pageSize, (unsigned char*)cache[cache_page_id], pageDir);
@@ -842,7 +829,7 @@ private:
 
                 if (attempt + 1 < SWAPVM_IO_MAX_ATTEMPTS)
                 {
-                    swapvmRetrySleep(delayMs);
+                    sleepMilliseconds(delayMs);
                     delayMs *= 2;
                 }
             }
