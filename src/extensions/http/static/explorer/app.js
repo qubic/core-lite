@@ -74,6 +74,57 @@ function setConn(ok, label) {
   $cn().textContent = label || (ok ? 'LIVE' : 'OFFLINE');
 }
 
+// ---------- theme ----------
+// Each theme is a {primary, secondary} accent pair; the rest of the palette
+// (bg, text, semantic colors) stays fixed. Picker swaps these CSS vars + glows.
+const THEMES = [
+  { name: 'Bitcoin',   primary: '#f7931a', secondary: '#00d4ff' },
+  { name: 'Synthwave', primary: '#ff5cf0', secondary: '#7c5cff' },
+  { name: 'Matrix',    primary: '#22ee9a', secondary: '#9bff66' },
+  { name: 'Inferno',   primary: '#ff5630', secondary: '#ffb547' },
+  { name: 'Arctic',    primary: '#38bdf8', secondary: '#818cf8' },
+];
+
+function hexToRgba(hex, a) {
+  const h = hex.replace('#', '');
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+function applyTheme(t) {
+  const s = document.documentElement.style;
+  s.setProperty('--orange', t.primary);
+  s.setProperty('--cyan', t.secondary);
+  s.setProperty('--glow-orange', `0 0 12px ${hexToRgba(t.primary, 0.55)}, 0 0 32px ${hexToRgba(t.primary, 0.20)}`);
+  s.setProperty('--glow-cyan',   `0 0 12px ${hexToRgba(t.secondary, 0.55)}, 0 0 32px ${hexToRgba(t.secondary, 0.18)}`);
+  s.setProperty('--bg-glow-1', hexToRgba(t.primary, 0.06));
+  s.setProperty('--bg-glow-2', hexToRgba(t.secondary, 0.05));
+  try { localStorage.setItem('explorer-theme', t.name); } catch (e) {}
+}
+
+function buildThemePicker() {
+  const host = document.getElementById('theme-picker');
+  if (!host) return;
+  let savedName = null;
+  try { savedName = localStorage.getItem('explorer-theme'); } catch (e) {}
+  const active = THEMES.find(t => t.name === savedName) || THEMES[0];
+  applyTheme(active);
+  host.innerHTML = THEMES.map(t => `
+    <button class="swatch ${t.name === active.name ? 'active' : ''}" title="${t.name}" data-theme="${t.name}"
+            style="background:linear-gradient(135deg, ${t.primary} 0 50%, ${t.secondary} 50% 100%)"></button>`).join('');
+  host.querySelectorAll('.swatch').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const t = THEMES.find(x => x.name === btn.dataset.theme);
+      if (!t) return;
+      applyTheme(t);
+      host.querySelectorAll('.swatch').forEach(b => b.classList.toggle('active', b === btn));
+    });
+  });
+}
+document.addEventListener('DOMContentLoaded', buildThemePicker);
+
 // ---------- router ----------
 let pollTimer = null;
 function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }

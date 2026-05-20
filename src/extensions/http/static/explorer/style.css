@@ -28,6 +28,10 @@
   --glow-cyan:   0 0 12px rgba(0,212,255,0.55),  0 0 32px rgba(0,212,255,0.18);
   --glow-green:  0 0 10px rgba(34,238,154,0.55), 0 0 28px rgba(34,238,154,0.20);
   --glow-red:    0 0 10px rgba(255,59,48,0.50),  0 0 28px rgba(255,59,48,0.18);
+
+  /* ambient page gradients — re-set by the theme picker */
+  --bg-glow-1: rgba(247,147,26,0.06);
+  --bg-glow-2: rgba(0,212,255,0.05);
 }
 
 * { box-sizing: border-box; }
@@ -36,8 +40,8 @@ html, body {
   margin: 0; padding: 0;
   background: var(--bg);
   background-image:
-    radial-gradient(ellipse at top left, rgba(247,147,26,0.06), transparent 50%),
-    radial-gradient(ellipse at bottom right, rgba(0,212,255,0.05), transparent 50%);
+    radial-gradient(ellipse at top left, var(--bg-glow-1), transparent 50%),
+    radial-gradient(ellipse at bottom right, var(--bg-glow-2), transparent 50%);
   background-attachment: fixed;
   color: var(--text);
   font-family: var(--mono);
@@ -134,6 +138,21 @@ html, body {
   color: var(--green);
 }
 .status-text.dead { color: var(--red); }
+
+.topbar-right { display: flex; align-items: center; gap: 1.25em; justify-content: flex-end; }
+.theme-picker { display: flex; align-items: center; gap: 6px; }
+.swatch {
+  width: 18px; height: 18px; padding: 0;
+  border: 1px solid var(--border-hi);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform 0.12s, box-shadow 0.12s, border-color 0.12s;
+}
+.swatch:hover { transform: scale(1.18); }
+.swatch.active {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px var(--bg), 0 0 8px rgba(255,255,255,0.45);
+}
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
