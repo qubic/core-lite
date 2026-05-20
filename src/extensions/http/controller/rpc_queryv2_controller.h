@@ -4,6 +4,7 @@
 #include <drogon/HttpController.h>
 #include <fmt/format.h>
 #include <optional>
+#include <deque>
 using namespace drogon;
 
 namespace RpcQueryV2
@@ -87,6 +88,10 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
     ADD_METHOD_TO(RpcQueryV2Controller::getTransactionsForIdentity, "/query/v1/getTransactionsForIdentity", Post);
     ADD_METHOD_TO(RpcQueryV2Controller::getTransactionsForTick, "/query/v1/getTransactionsForTick", Post, "RpcQueryV2::MiddleWare::TickNumberVerifier");
     ADD_METHOD_TO(RpcQueryV2Controller::getEventLogs, "/query/v1/getEventLogs", Post);
+    ADD_METHOD_TO(RpcQueryV2Controller::getTransfersForIdentity, "/query/v1/getTransfersForIdentity", Post);
+    ADD_METHOD_TO(RpcQueryV2Controller::getContractCalls,        "/query/v1/getContractCalls",        Post);
+    ADD_METHOD_TO(RpcQueryV2Controller::getContracts,            "/query/v1/getContracts",            Get);
+    ADD_METHOD_TO(RpcQueryV2Controller::getVotesForTick,         "/query/v1/getVotesForTick",         Post);
     METHOD_LIST_END
 
     inline void getComputorListsForEpoch(const HttpRequestPtr &req,
@@ -273,7 +278,11 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
         unsigned int foundSlot = 0;
         bool found = false;
         TickData localTickData;
-        for (unsigned int tick = system.initialTick; tick <= system.tick && !found; tick++)
+        // Optional tickNumber hint bounds the scan to one tick instead of the whole epoch.
+        const bool hasTickHint = (*json).isMember("tickNumber");
+        const unsigned int scanLo = hasTickHint ? (*json)["tickNumber"].asUInt() : system.initialTick;
+        const unsigned int scanHi = hasTickHint ? scanLo : system.tick;
+        for (unsigned int tick = scanLo; tick <= scanHi && !found; tick++)
         {
             TickStorage::tickData.acquireLock();
             TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
@@ -548,6 +557,304 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
             res->setStatusCode(k500InternalServerError);
             cb(res);
         }
+    }
+
+    // Returns recent transfers (incoming + outgoing) for an identity.
+    // Request:  {identity, direction?:"in"|"out"|"both" (default "both"), limit?:50}
+    // Response: {transactions: [{ ...tx, direction: "in"|"out" }]}, newest tick first.
+    inline void getTransfersForIdentity(const HttpRequestPtr &req,
+                                        std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        Json::Value result;
+        auto json = req->getJsonObject();
+        if (!json || !(*json).isMember("identity"))
+        {
+            result["code"] = StatusCode::BadRequest;
+            result["message"] = "Missing identity field";
+            auto res = HttpResponse::newHttpJsonResponse(result);
+            res->setStatusCode(k400BadRequest);
+            cb(res);
+            return;
+        }
+
+        std::string identityStr = (*json)["identity"].asString();
+        m256i publicKey{};
+        if (!getPublicKeyFromIdentity(reinterpret_cast<const unsigned char *>(identityStr.c_str()), publicKey.m256i_u8))
+        {
+            result["code"] = StatusCode::BadRequest;
+            result["message"] = fmt::format("invalid identity [{}]", identityStr);
+            auto res = HttpResponse::newHttpJsonResponse(result);
+            res->setStatusCode(k400BadRequest);
+            cb(res);
+            return;
+        }
+
+        std::string direction = (*json).get("direction", "both").asString();
+        const bool wantIn  = (direction == "in"  || direction == "both");
+        const bool wantOut = (direction == "out" || direction == "both");
+        const unsigned int limit = (*json).get("limit", 50).asUInt();
+
+        Json::Value transactions(Json::arrayValue);
+        // pair of (buf, direction); walk newest tick → oldest, stop at limit.
+        struct Hit { std::vector<unsigned char> buf; const char* dir; };
+        std::vector<Hit> hits;
+        hits.reserve(limit);
+
+        for (unsigned int tick = system.tick; tick + 1 > system.initialTick && hits.size() < limit; tick--)
+        {
+            TickData localTickData;
+            TickStorage::tickData.acquireLock();
+            TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
+            if (tickData) copyMem(&localTickData, tickData, sizeof(TickData));
+            TickStorage::tickData.releaseLock();
+            if (!tickData)
+            {
+                if (tick == 0) break;
+                continue;
+            }
+
+            ts.tickTransactions.acquireLock();
+            unsigned long long *offsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(tick);
+            for (unsigned int i = 0; i < NUMBER_OF_TRANSACTIONS_PER_TICK && hits.size() < limit; i++)
+            {
+                if (isZero(localTickData.transactionDigests[i]) || !offsets[i]) continue;
+                Transaction *txPtr = ts.tickTransactions(offsets[i]);
+                const bool isOut = (txPtr->sourcePublicKey      == publicKey);
+                const bool isIn  = (txPtr->destinationPublicKey == publicKey);
+                const char* dir = nullptr;
+                if (isOut && wantOut)      dir = "out";
+                else if (isIn && wantIn)   dir = "in";
+                if (dir)
+                {
+                    const unsigned int sz = txPtr->totalSize();
+                    Hit h{ std::vector<unsigned char>(sz), dir };
+                    copyMem(h.buf.data(), txPtr, sz);
+                    hits.push_back(std::move(h));
+                }
+            }
+            ts.tickTransactions.releaseLock();
+            if (tick == 0) break;
+        }
+
+        for (auto &h : hits)
+        {
+            Json::Value txJson = HttpUtils::transactionToJson(reinterpret_cast<Transaction *>(h.buf.data()));
+            txJson["direction"] = h.dir;
+            transactions.append(txJson);
+        }
+        result["identity"] = identityStr;
+        result["count"]    = (unsigned int)hits.size();
+        result["transactions"] = transactions;
+        cb(HttpResponse::newHttpJsonResponse(result));
+    }
+
+    // Server-side scan for txs whose destination is a smart-contract pubkey.
+    // A contract pubkey is m256i(idx, 0, 0, 0) — upper 3 uint64 chunks are zero.
+    // Request:  {fromTick, toTick, contractIndex?, page?:0, pageSize?:50}
+    // Response: {fromTick, toTick, total, page, pageSize, transactions:[{...tx, contractIndex}]}
+    // toTick capped at system.tick. fromTick clamped to system.initialTick.
+    // Scan range capped at 1000 ticks per call to bound work.
+    inline void getContractCalls(const HttpRequestPtr &req,
+                                 std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        Json::Value result;
+        auto json = req->getJsonObject();
+        if (!json)
+        {
+            result["code"] = StatusCode::BadRequest;
+            result["message"] = "Invalid JSON";
+            auto res = HttpResponse::newHttpJsonResponse(result);
+            res->setStatusCode(k400BadRequest);
+            cb(res);
+            return;
+        }
+
+        unsigned int toTick = (*json).get("toTick", system.tick).asUInt();
+        unsigned int fromTick = (*json).get("fromTick", 0).asUInt();
+        const bool hasFilter = (*json).isMember("contractIndex");
+        const unsigned int filterIdx = hasFilter ? (*json)["contractIndex"].asUInt() : 0;
+        const unsigned int page = (*json).get("page", 0).asUInt();
+        const unsigned int pageSize = std::min((unsigned int)200, (*json).get("pageSize", 50).asUInt());
+
+        if (toTick > system.tick) toTick = system.tick;
+        if (fromTick < system.initialTick) fromTick = system.initialTick;
+        if (fromTick > toTick) {
+            result["fromTick"] = fromTick;
+            result["toTick"] = toTick;
+            result["total"] = 0;
+            result["page"] = page;
+            result["pageSize"] = pageSize;
+            result["transactions"] = Json::Value(Json::arrayValue);
+            cb(HttpResponse::newHttpJsonResponse(result));
+            return;
+        }
+        // cap range to 1000 ticks
+        if (toTick - fromTick + 1 > 1000) {
+            fromTick = toTick - 1000 + 1;
+        }
+
+        struct Hit { std::vector<unsigned char> buf; unsigned int idx; };
+        std::vector<Hit> hits;
+        hits.reserve(256);
+
+        for (unsigned int tick = toTick; tick + 1 > fromTick; tick--)
+        {
+            TickData localTickData;
+            TickStorage::tickData.acquireLock();
+            TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
+            if (tickData) copyMem(&localTickData, tickData, sizeof(TickData));
+            TickStorage::tickData.releaseLock();
+            if (!tickData) {
+                if (tick == 0) break;
+                continue;
+            }
+
+            ts.tickTransactions.acquireLock();
+            unsigned long long *offsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(tick);
+            for (unsigned int i = 0; i < NUMBER_OF_TRANSACTIONS_PER_TICK; i++)
+            {
+                if (isZero(localTickData.transactionDigests[i]) || !offsets[i]) continue;
+                Transaction *txPtr = ts.tickTransactions(offsets[i]);
+                const m256i &dest = txPtr->destinationPublicKey;
+                // contract pubkey: upper 3 chunks all zero
+                if (dest.m256i_u64[1] != 0 || dest.m256i_u64[2] != 0 || dest.m256i_u64[3] != 0) continue;
+                const unsigned int idx = (unsigned int)dest.m256i_u64[0];
+                if (hasFilter && idx != filterIdx) continue;
+                const unsigned int sz = txPtr->totalSize();
+                Hit h{ std::vector<unsigned char>(sz), idx };
+                copyMem(h.buf.data(), txPtr, sz);
+                hits.push_back(std::move(h));
+            }
+            ts.tickTransactions.releaseLock();
+            if (tick == 0) break;
+        }
+
+        const unsigned int total = (unsigned int)hits.size();
+        const unsigned int start = page * pageSize;
+        const unsigned int end = std::min(total, start + pageSize);
+
+        Json::Value transactions(Json::arrayValue);
+        for (unsigned int k = start; k < end; k++)
+        {
+            Json::Value txJson = HttpUtils::transactionToJson(reinterpret_cast<Transaction *>(hits[k].buf.data()));
+            txJson["contractIndex"] = hits[k].idx;
+            transactions.append(txJson);
+        }
+
+        result["fromTick"] = fromTick;
+        result["toTick"] = toTick;
+        result["total"] = total;
+        result["page"] = page;
+        result["pageSize"] = pageSize;
+        result["transactions"] = transactions;
+        cb(HttpResponse::newHttpJsonResponse(result));
+    }
+
+    // Return per-computor Tick votes for the given tick. Each non-empty Tick struct
+    // (one per computor index 0..675) is serialized with its digests and signature.
+    // Request:  {tickNumber}
+    // Response: {tickNumber, votes:[{computorIndex, epoch, tick, timestamp,
+    //   prevSpectrumDigest, saltedSpectrumDigest, prevUniverseDigest, saltedUniverseDigest,
+    //   prevComputerDigest, saltedComputerDigest, transactionDigest,
+    //   expectedNextTickTransactionDigest,
+    //   prevResourceTestingDigest, saltedResourceTestingDigest,
+    //   prevTransactionBodyDigest, saltedTransactionBodyDigest, signature}], count}
+    inline void getVotesForTick(const HttpRequestPtr &req,
+                                std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        Json::Value result;
+        auto json = req->getJsonObject();
+        if (!json || !(*json).isMember("tickNumber"))
+        {
+            result["code"] = StatusCode::BadRequest;
+            result["message"] = "Missing tickNumber";
+            auto res = HttpResponse::newHttpJsonResponse(result);
+            res->setStatusCode(k400BadRequest);
+            cb(res);
+            return;
+        }
+        unsigned int tickNumber = (*json)["tickNumber"].asUInt();
+        if (tickNumber < system.initialTick || tickNumber > system.tick)
+        {
+            result["code"] = StatusCode::NotFound;
+            result["message"] = fmt::format("tick {} out of epoch range [{}, {}]",
+                                            tickNumber, system.initialTick, system.tick);
+            auto res = HttpResponse::newHttpJsonResponse(result);
+            res->setStatusCode(k404NotFound);
+            cb(res);
+            return;
+        }
+
+        Json::Value votes(Json::arrayValue);
+
+        // copy all 676 per-computor Tick structs under the locks
+        Tick localCopy[NUMBER_OF_COMPUTORS];
+        for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
+        {
+            ts.ticks.acquireLock(i);
+            const Tick *src = TickStorage::ticks.getByTickInCurrentEpoch(tickNumber) + i;
+            copyMem(&localCopy[i], src, sizeof(Tick));
+            ts.ticks.releaseLock(i);
+        }
+
+        unsigned int count = 0;
+        for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
+        {
+            Tick &t = localCopy[i];
+            // empty / never-received slot — only current-epoch entries are real votes
+            if (t.epoch != system.epoch) continue;
+            count++;
+            Json::Value v;
+            v["computorIndex"] = t.computorIndex;
+            v["epoch"] = t.epoch;
+            v["tick"] = t.tick;
+            v["timestamp"] = HttpUtils::formatTimestamp(t.millisecond, t.second, t.minute,
+                                                        t.hour, t.day, t.month, t.year);
+            v["prevSpectrumDigest"]       = base64_encode(t.prevSpectrumDigest.m256i_u8, 32);
+            v["saltedSpectrumDigest"]     = base64_encode(t.saltedSpectrumDigest.m256i_u8, 32);
+            v["prevUniverseDigest"]       = base64_encode(t.prevUniverseDigest.m256i_u8, 32);
+            v["saltedUniverseDigest"]     = base64_encode(t.saltedUniverseDigest.m256i_u8, 32);
+            v["prevComputerDigest"]       = base64_encode(t.prevComputerDigest.m256i_u8, 32);
+            v["saltedComputerDigest"]     = base64_encode(t.saltedComputerDigest.m256i_u8, 32);
+            v["transactionDigest"]        = base64_encode(t.transactionDigest.m256i_u8, 32);
+            v["expectedNextTickTransactionDigest"] = base64_encode(t.expectedNextTickTransactionDigest.m256i_u8, 32);
+            v["prevResourceTestingDigest"]   = t.prevResourceTestingDigest;
+            v["saltedResourceTestingDigest"] = t.saltedResourceTestingDigest;
+            v["prevTransactionBodyDigest"]   = t.prevTransactionBodyDigest;
+            v["saltedTransactionBodyDigest"] = t.saltedTransactionBodyDigest;
+            v["signature"] = base64_encode(t.signature, SIGNATURE_SIZE);
+            votes.append(v);
+        }
+
+        result["tickNumber"] = tickNumber;
+        result["count"]      = count;
+        result["votes"]      = votes;
+        cb(HttpResponse::newHttpJsonResponse(result));
+    }
+
+    // Read the contractDescriptions[] table from contract_def.h and expose it
+    // so the frontend can map contractIndex → name without baking the list in.
+    inline void getContracts(const HttpRequestPtr &req,
+                             std::function<void(const HttpResponsePtr &)> &&cb)
+    {
+        Json::Value result;
+        Json::Value arr(Json::arrayValue);
+        for (unsigned int i = 0; i < contractCount; i++)
+        {
+            const auto &cd = contractDescriptions[i];
+            char name[8] = {0};
+            for (int k = 0; k < 7 && cd.assetName[k]; k++) name[k] = cd.assetName[k];
+            Json::Value c;
+            c["index"] = i;
+            c["name"] = std::string(name);
+            c["constructionEpoch"] = cd.constructionEpoch;
+            c["destructionEpoch"] = cd.destructionEpoch;
+            c["stateSize"] = (Json::UInt64)cd.stateSize;
+            arr.append(c);
+        }
+        result["contracts"] = arr;
+        result["count"] = contractCount;
+        cb(HttpResponse::newHttpJsonResponse(result));
     }
 
     inline void getTransactionsForTick(const HttpRequestPtr &req,
@@ -1146,6 +1453,14 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
             }
             if (size > 1000) size = 1000;
 
+            // order: "asc" (default, oldest-first per RPC spec) | "desc" (newest-first).
+            bool descOrder = false;
+            if (json && (*json).isMember("order"))
+            {
+                std::string ord = (*json)["order"].asString();
+                descOrder = (ord == "desc" || ord == "DESC");
+            }
+
             const unsigned int validForTick = system.tick;
 
             // Epoch filter / range: if it doesn't intersect system.epoch, short-circuit.
@@ -1321,6 +1636,8 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
             const unsigned long long pageEndExclusive = (unsigned long long)offset + (unsigned long long)size;
             std::vector<Json::Value> page;
             page.reserve(size);
+            // desc: keep a rolling tail of the newest pageEndExclusive matches (asc order).
+            std::deque<Json::Value> dtail;
 
             const unsigned long long bufSize = qLogger::logBuffer.size();
             // Per-tick caches so we only fetch each tick's data once.
@@ -1438,20 +1755,47 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
                     continue;
                 }
 
-                if (totalMatched >= (unsigned long long)offset && totalMatched < pageEndExclusive)
+                // Build JSON only for entries we might return: the asc page window, or
+                // (desc) every match — capped to the rolling tail below.
+                bool wantBuild = descOrder
+                    || (totalMatched >= (unsigned long long)offset && totalMatched < pageEndExclusive);
+                if (wantBuild)
                 {
-                    page.push_back(eventLogToJson(reinterpret_cast<const char *>(blob.data()),
-                                                  (unsigned int)entryLen,
-                                                  cachedTickData, txHashForEvent, categories));
+                    Json::Value je = eventLogToJson(reinterpret_cast<const char *>(blob.data()),
+                                                    (unsigned int)entryLen,
+                                                    cachedTickData, txHashForEvent, categories);
+                    if (descOrder)
+                    {
+                        dtail.push_back(std::move(je));
+                        if (dtail.size() > (size_t)pageEndExclusive) dtail.pop_front();
+                    }
+                    else
+                    {
+                        page.push_back(std::move(je));
+                    }
                 }
                 totalMatched++;
-                if (totalMatched >= 10000 && totalMatched >= pageEndExclusive) stopAll = true;
+                // asc can stop once the window is filled past the 10k cap; desc must reach
+                // the buffer end since the newest matches live at the tail.
+                if (!descOrder && totalMatched >= 10000 && totalMatched >= pageEndExclusive) stopAll = true;
                 offsetBytes += entryLen;
             }
 
             unsigned long long capped = std::min<unsigned long long>(totalMatched, 10000ULL);
             Json::Value eventLogs(Json::arrayValue);
-            for (auto &e : page) eventLogs.append(std::move(e));
+            if (descOrder)
+            {
+                // dtail holds the newest min(total, pageEndExclusive) matches in asc order.
+                // The desc page [offset, offset+size) maps to asc local [K-offset-size, K-offset).
+                long long K = (long long)dtail.size();
+                long long ls = K - (long long)offset - (long long)size; if (ls < 0) ls = 0;
+                long long le = K - (long long)offset; if (le < 0) le = 0; if (le > K) le = K;
+                for (long long i = le - 1; i >= ls; i--) eventLogs.append(dtail[(size_t)i]);
+            }
+            else
+            {
+                for (auto &e : page) eventLogs.append(std::move(e));
+            }
 
             Json::Value hits;
             hits["total"] = (Json::UInt)capped;

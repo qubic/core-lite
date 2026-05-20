@@ -19,6 +19,7 @@ static unsigned long long httpPasscodes[4] = {};
 #include "controller/rpc_queryv2_controller.h"
 #include "controller/rpc_live_controller.h"
 #include "controller/rpc_stats_controller.h"
+#include "controller/explorer_controller.h"
 #endif
 
 using namespace drogon;

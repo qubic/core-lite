@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>QUBIC // explorer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Major+Mono+Display&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/explorer/style.css">
+</head>
+<body>
+  <div class="scanlines" aria-hidden="true"></div>
+  <div class="grain" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <a class="brand" href="#/">
+      <span class="logo">◈</span>
+      <span class="logo-text">QUBIC <span class="logo-sub">// EXPLORER</span></span>
+    </a>
+    <nav>
+      <a href="#/">_overview</a>
+      <a href="#/computors">_computors</a>
+      <a href="#/contracts">_contracts</a>
+      <a href="#/logs">_logs</a>
+      <a href="#/id/">_lookup</a>
+    </nav>
+    <div class="status">
+      <span class="led" id="conn-led"></span>
+      <span class="status-text mono" id="conn-text">CONNECTING</span>
+    </div>
+  </header>
+
+  <main id="view"><p class="muted mono">› awaiting feed…</p></main>
+
+  <footer>
+    <div class="ticker-tape" id="ticker">
+      <span class="mono muted">QUBIC-CORE-LITE :: TICK FEED LIVE :: 0x</span>
+    </div>
+  </footer>
+
+  <script src="/explorer/app.js"></script>
+</body>
+</html>

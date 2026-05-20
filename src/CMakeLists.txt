@@ -105,6 +105,24 @@ add_executable(
   ${ASM_OBJ}
 )
 
+# Explorer asset bundling: regen embedded header when HTML/CSS/JS change.
+if(NOT WIN32)
+    set(EXPLORER_ASSETS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extensions/http/static/explorer)
+    set(EXPLORER_ASSETS_OUT ${CMAKE_CURRENT_SOURCE_DIR}/extensions/http/controller/explorer_assets.generated.h)
+    add_custom_command(
+        OUTPUT  ${EXPLORER_ASSETS_OUT}
+        DEPENDS ${EXPLORER_ASSETS_DIR}/index.html
+                ${EXPLORER_ASSETS_DIR}/style.css
+                ${EXPLORER_ASSETS_DIR}/app.js
+                ${EXPLORER_ASSETS_DIR}/regen.sh
+        COMMAND bash ${EXPLORER_ASSETS_DIR}/regen.sh
+        COMMENT "Regenerating explorer embedded assets header"
+        VERBATIM
+    )
+    add_custom_target(explorer_assets_gen DEPENDS ${EXPLORER_ASSETS_OUT})
+    add_dependencies(Qubic explorer_assets_gen)
+endif()
+
 if(TESTNET)
     target_compile_definitions(Qubic PRIVATE TESTNET)
 endif()
