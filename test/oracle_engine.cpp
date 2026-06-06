@@ -999,9 +999,9 @@ TEST(OracleEngine, MultiContractQuerySuccess)
 	ts.checkStateConsistencyWithAssert();
 	for (int tick = 0; tick < 3; ++tick)
 	{
-		const unsigned long long* tsTickTransactionOffsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(system.tick);
-		const unsigned long long* tsTickTransactionOffsets2 = ts.tickTransactionOffsets.getByTickInCurrentEpoch(system.tick + 1);
-		const unsigned long long* tsTickTransactionOffsets3 = ts.tickTransactionOffsets.getByTickInCurrentEpoch(system.tick + 2);
+		auto tsTickTransactionOffsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(system.tick);
+		auto tsTickTransactionOffsets2 = ts.tickTransactionOffsets.getByTickInCurrentEpoch(system.tick + 1);
+		auto tsTickTransactionOffsets3 = ts.tickTransactionOffsets.getByTickInCurrentEpoch(system.tick + 2);
 		for (txIndexInTickData = 0; txIndexInTickData < NUMBER_OF_TRANSACTIONS_PER_TICK; ++txIndexInTickData)
 		{
 			const unsigned long long offset = tsTickTransactionOffsets[txIndexInTickData];

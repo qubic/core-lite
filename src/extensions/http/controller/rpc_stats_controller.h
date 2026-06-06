@@ -86,7 +86,7 @@ public:
         Json::Value result;
         Json::Value data;
         TickStorage::tickData.acquireLock();
-        TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(system.tick - 1);
+        auto tickData = TickStorage::tickData.getByTickIfNotEmpty(system.tick - 1);
         if (tickData)
         {
             data["timestamp"] = HttpUtils::formatTimestamp(
@@ -115,7 +115,7 @@ public:
             TickStorage::tickData.acquireLock();
            for (unsigned int tick = system.initialTick; tick < system.tick; tick++)
            {
-               TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
+               auto tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
                if (!tickData)
                {
                    emptyTicks++;

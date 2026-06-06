@@ -72,7 +72,7 @@ static const Transaction* addOracleTransactionToTickStorage(const Transaction* t
     ASSERT(txIndex < NUMBER_OF_TRANSACTIONS_PER_TICK);
     Transaction* tsTx = nullptr;
     const unsigned int txSize = tx->totalSize();
-    auto* offsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(tx->tick);
+    auto offsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(tx->tick);
     if (ts.nextTickTransactionOffset + txSize <= ts.tickTransactions.storageSpaceCurrentEpoch)
     {
         EXPECT_EQ(offsets[txIndex], 0);

@@ -927,7 +927,8 @@ static void processBroadcastTick(Peer* peer, RequestResponseHeader* header)
             ts.ticks.acquireLock(request->tick.computorIndex);
 
             // Find element in tick storage and check if contains data (epoch is set to 0 on init)
-            Tick* tsTick = ts.ticks.getByTickInCurrentEpoch(request->tick.tick) + request->tick.computorIndex;
+            auto tsTickBlock = ts.ticks.getByTickInCurrentEpoch(request->tick.tick);
+            Tick* tsTick = tsTickBlock + request->tick.computorIndex;
             if (tsTick->epoch == system.epoch)
             {
                 // Check if the sent tick matches the tick in tick storage
@@ -1139,7 +1140,7 @@ static void processBroadcastTransaction(Peer* peer, RequestResponseHeader* heade
                 && ts.tickData[tickIndex].epoch == system.epoch)
             {
                 KangarooTwelve(request, transactionSize, digest, sizeof(digest));
-                auto* tsReqTickTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(tickIndex);
+                auto tsReqTickTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(tickIndex);
                 for (unsigned int i = 0; i < NUMBER_OF_TRANSACTIONS_PER_TICK; i++)
                 {
                     if (digest == ts.tickData[tickIndex].transactionDigests[i])
@@ -1237,7 +1238,7 @@ static void processRequestQuorumTick(Peer* peer, RequestResponseHeader* header)
     }
 
     unsigned short tickEpoch = 0;
-    const Tick* tsCompTicks;
+    PinnedPtr<Tick> tsCompTicks;
     if (ts.tickInCurrentEpochStorage(request->quorumTick.tick))
     {
         tickEpoch = system.epoch;
@@ -1295,10 +1296,10 @@ static void processRequestTickData(Peer* peer, RequestResponseHeader* header)
     }
     // SWAP: we need atomic here to avoid flush the page while another thread is writing to it
     ts.tickData.acquireLock();
-    TickData* td = ts.tickData.getByTickIfNotEmpty(request->requestedTickData.tick);
+    auto td = ts.tickData.getByTickIfNotEmpty(request->requestedTickData.tick);
     if (td)
     {
-        enqueueResponse(peer, sizeof(TickData), BroadcastFutureTickData::type(), header->dejavu(), td);
+        enqueueResponse(peer, sizeof(TickData), BroadcastFutureTickData::type(), header->dejavu(), td.get());
     }
     else
     {
@@ -1314,7 +1315,7 @@ static void processRequestTickTransactions(Peer* peer, RequestResponseHeader* he
     RequestTickTransactions* request = header->getPayload<RequestTickTransactions>();
 
     unsigned short tickEpoch = 0;
-    const unsigned long long* tsReqTickTransactionOffsets;
+    PinnedPtr<unsigned long long> tsReqTickTransactionOffsets;
     if (ts.tickInCurrentEpochStorage(request->tick))
     {
         tickEpoch = system.epoch;
@@ -3111,7 +3112,7 @@ static void makeAndBroadcastTickVotesTransaction(int i, BroadcastFutureTickData&
     unsigned int tickIndex = ts.tickToIndexCurrentEpoch(td.tickData.tick);
     unsigned int transactionSize = sizeof(voteCounterPayload);
     KangarooTwelve(&payload, transactionSize, digest, sizeof(digest));
-    auto* tsReqTickTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(tickIndex);
+    auto tsReqTickTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(tickIndex);
     if (txSlot < NUMBER_OF_TRANSACTIONS_PER_TICK) // valid slot
     {
         // TODO: refactor function add transaction to txStorage
@@ -3156,7 +3157,7 @@ static bool makeAndBroadcastCustomMiningTransaction(
             unsigned int tickIndex = ts.tickToIndexCurrentEpoch(td.tickData.tick);
             unsigned int transactionSize = sizeof(payload);
             KangarooTwelve(&payload, transactionSize, digest, sizeof(digest));
-            auto* tsReqTickTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(tickIndex);
+            auto tsReqTickTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(tickIndex);
             if (txSlot < NUMBER_OF_TRANSACTIONS_PER_TICK)
             {
                 ts.tickTransactions.acquireLock();
@@ -3226,7 +3227,7 @@ static bool makeAndBroadcastExecutionFeeTransaction(int i, BroadcastFutureTickDa
     // Copy the content of this exectuion fee report to local memory
     unsigned int tickIndex = ts.tickToIndexCurrentEpoch(td.tickData.tick);
     KangarooTwelve(&payload, transactionSize, digest, sizeof(digest));
-    auto* tsReqTickTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(tickIndex);
+    auto tsReqTickTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(tickIndex);
     if (txSlot < NUMBER_OF_TRANSACTIONS_PER_TICK) // valid slot
     {
         // TODO: refactor function add transaction to txStorage
@@ -3335,7 +3336,7 @@ static void processTick(unsigned long long processorNumber)
     unsigned long long solutionProcessStartTick = __rdtsc(); // for tracking the time processing solutions
     if (nextTickData.epoch == system.epoch)
     {
-        auto* tsCurrentTickTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(tickIndex);
+        auto tsCurrentTickTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(tickIndex);
 #if ADDON_TX_STATUS_REQUEST
         txStatusData.tickTxIndexStart[system.tick - system.initialTick] = numberOfTransactions; // qli: part of tx_status_request add-on
 #endif
@@ -3665,8 +3666,8 @@ static void processTick(unsigned long long processorNumber)
             // Look up query tx to get query data.
             ASSERT(finishedUserQuery->type == ORACLE_QUERY_TYPE_USER_QUERY);
             ASSERT(ts.tickInCurrentEpochStorage(finishedUserQuery->queryTick));
-            const uint64_t* tsTickTransactionOffsets
-                = (uint64_t*)ts.tickTransactionOffsets.getByTickInCurrentEpoch(finishedUserQuery->queryTick);
+            auto tsTickTransactionOffsets
+                = ts.tickTransactionOffsets.getByTickInCurrentEpoch(finishedUserQuery->queryTick);
             const uint32_t txSlotInTickData = finishedUserQuery->typeVar.user.queryTxIndex;
             ASSERT(txSlotInTickData < NUMBER_OF_TRANSACTIONS_PER_TICK);
             const auto* prevTx = (OracleUserQueryTransactionPrefix*)ts.tickTransactions.ptr(
@@ -4562,7 +4563,7 @@ static void initializeFirstTick()
             setMem(uniqueVoteCount, sizeof(uniqueVoteCount), 0);
             uniqueCount = 0;
 
-            const Tick* tsCompTicks = ts.ticks.getByTickIndex(firstTickIndex);
+            auto tsCompTicks = ts.ticks.getByTickIndex(firstTickIndex);
             for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
             {
                 ts.ticks.acquireLock(i);
@@ -5074,7 +5075,7 @@ static void updateFutureTickCount()
 {
     const unsigned int nextTick = system.tick + 1;
     const unsigned int nextTickIndex = ts.tickToIndexCurrentEpoch(nextTick);
-    const Tick* tsCompTicks = ts.ticks.getByTickIndex(nextTickIndex);
+    auto tsCompTicks = ts.ticks.getByTickIndex(nextTickIndex);
     unsigned int futureTickTotalNumberOfComputors = 0;
     for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
     {
@@ -5096,7 +5097,7 @@ static int findCurrentDigestsFromNextTickVotes(m256i &spectrumDigest, unsigned i
 
     const unsigned int nextTick = system.tick + 1;
     const unsigned int nextTickIndex = ts.tickToIndexCurrentEpoch(nextTick);
-    const Tick* tsCompTicks = ts.ticks.getByTickIndex(nextTickIndex);
+    auto tsCompTicks = ts.ticks.getByTickIndex(nextTickIndex);
     unsigned int numberOfUniqueCurrentSpectrumDigests = 0;
     setMem(uniqueCurrentSpectrumDigests, sizeof(uniqueCurrentSpectrumDigests), 0);
     setMem(uniqueCurrentSpectrumDigestCounters, sizeof(uniqueCurrentSpectrumDigestCounters), 0);
@@ -5205,7 +5206,7 @@ static void findNextTickDataDigestFromNextTickVotes()
 {
     const unsigned int nextTick = system.tick + 1;
     const unsigned int nextTickIndex = ts.tickToIndexCurrentEpoch(nextTick);
-    const Tick* tsCompTicks = ts.ticks.getByTickIndex(nextTickIndex);
+    auto tsCompTicks = ts.ticks.getByTickIndex(nextTickIndex);
     unsigned int numberOfEmptyNextTickTransactionDigest = 0;
     unsigned int numberOfUniqueNextTickTransactionDigests = 0;
     for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
@@ -5267,7 +5268,7 @@ static void findNextTickDataDigestFromNextTickVotes()
 static void findNextTickDataDigestFromCurrentTickVotes()
 {
     const unsigned int currentTickIndex = ts.tickToIndexCurrentEpoch(system.tick);
-    const Tick* tsCompTicks = ts.ticks.getByTickIndex(currentTickIndex);
+    auto tsCompTicks = ts.ticks.getByTickIndex(currentTickIndex);
     unsigned int numberOfEmptyNextTickTransactionDigest = 0;
     unsigned int numberOfUniqueNextTickTransactionDigests = 0;
     for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
@@ -5331,7 +5332,7 @@ static unsigned int countCurrentTickVote()
 {
     const unsigned int currentTickIndex = ts.tickToIndexCurrentEpoch(system.tick);
     unsigned int tickTotalNumberOfComputors = 0;
-    const Tick* tsCompTicks = ts.ticks.getByTickIndex(currentTickIndex);
+    auto tsCompTicks = ts.ticks.getByTickIndex(currentTickIndex);
     for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
     {
         ts.ticks.acquireLock(i);
@@ -5365,7 +5366,7 @@ static void prepareNextTickTransactions()
     // unknownTransactions is set to 1 if a transaction is missing in the local storage
     unsigned long long unknownTransactions[NUMBER_OF_TRANSACTIONS_PER_TICK / 64];
     setMem(unknownTransactions, sizeof(unknownTransactions), 0);
-    const auto* tsNextTickTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(nextTickIndex);
+    auto tsNextTickTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(nextTickIndex);
     
     // This function maybe called multiple times per tick due to lack of data (txs or votes)
     // Here we do a simple pre scan to check txs via tsNextTickTransactionOffsets (already processed - aka already copying from pendingTransaction array to tickTransaction)
@@ -5417,7 +5418,7 @@ static void prepareNextTickTransactions()
             if (pendingTransaction)
             {
                 ASSERT(pendingTransaction->checkValidity());
-                auto* tsPendingTransactionOffsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(pendingTransaction->tick);
+                auto tsPendingTransactionOffsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(pendingTransaction->tick);
 
                 const m256i* digest = pendingTxsPool.getDigest(nextTick, i);
                 if (digest)
@@ -5490,7 +5491,7 @@ static void computeTxBodyDigestBase(const int tick)
     XKCP::KangarooTwelve_Initialize(&g_k12_instance, 128, outputLen);
 
     const unsigned int tickIndex = ts.tickToIndexCurrentEpoch(tick);
-    const auto* tsTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(tickIndex);
+    auto tsTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(tickIndex);
 
     for (unsigned int i = 0; i < NUMBER_OF_TRANSACTIONS_PER_TICK; i++)
     {
@@ -5617,7 +5618,7 @@ static void broadcastTickVotes()
 static void updateVotesCount(unsigned int& tickNumberOfComputors, unsigned int& tickTotalNumberOfComputors, m256i &outComputerDigest)
 {
     const unsigned int currentTickIndex = ts.tickToIndexCurrentEpoch(system.tick);
-    const Tick* tsCompTicks = ts.ticks.getByTickIndex(currentTickIndex);
+    auto tsCompTicks = ts.ticks.getByTickIndex(currentTickIndex);
     for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
     {
         ts.ticks.acquireLock(i);
@@ -5782,7 +5783,7 @@ void reprocessSolutionTransaction(unsigned long long processorNumber)
     TickData currentTickData;
     // copy system.tick data
     ts.tickData.acquireLock();
-    copyMem(&currentTickData, ts.tickData.getByTickIfNotEmpty(system.tick), sizeof(TickData));
+    copyMem(&currentTickData, ts.tickData.getByTickIfNotEmpty(system.tick).get(), sizeof(TickData));
     ts.tickData.releaseLock();
 
     // first rollback the miner scores data
@@ -6247,13 +6248,10 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                         ts.tickData.acquireLock();
                         setMem(&ts.tickData[idx], sizeof(TickData), 0);
                         ts.tickData.releaseLock();
-                        auto* offsets = ts.tickTransactionOffsets.getByTickIndex(idx);
-                        if (offsets)
-                        {
-                            setMem(offsets,
-                                   NUMBER_OF_TRANSACTIONS_PER_TICK * sizeof(unsigned long long),
-                                   0);
-                        }
+                        auto offsets = ts.tickTransactionOffsets.getByTickIndex(idx);
+                        setMem(offsets.get(),
+                               NUMBER_OF_TRANSACTIONS_PER_TICK * sizeof(unsigned long long),
+                               0);
                         setText(message, L"AUTO-FLUSH: stuck on tick ");
                         appendNumber(message, system.tick, false);
                         appendText(message, L" for >");
@@ -8758,6 +8756,17 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     updateTime();
                 }
 
+                // Swap VM pin/cache stats: print one VM per ~second so operators can watch pin
+                // pressure (pinnedHighWater vs cache size) without flooding the console.
+                static unsigned long long swapStatsTick = 0;
+                static int swapStatsVmIndex = 0;
+                if (curTimeTick - swapStatsTick >= frequency)
+                {
+                    swapStatsTick = curTimeTick;
+                    const int swapVmCount = ts.printSwapVmStat(swapStatsVmIndex);
+                    swapStatsVmIndex = (swapStatsVmIndex + 1) % swapVmCount;
+                }
+
                 if (contractProcessorState == 1)
                 {
                     contractProcessorState = 2;
@@ -8939,7 +8948,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                         requestedQuorumTick.header.randomizeDejavu();
                         requestedQuorumTick.requestQuorumTick.quorumTick.tick = system.tick;
                         setMem(&requestedQuorumTick.requestQuorumTick.quorumTick.voteFlags, sizeof(requestedQuorumTick.requestQuorumTick.quorumTick.voteFlags), 0);
-                        const Tick* tsCompTicks = ts.ticks.getByTickInCurrentEpoch(system.tick);
+                        auto tsCompTicks = ts.ticks.getByTickInCurrentEpoch(system.tick);
                         for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
                         {
                             if (tsCompTicks[i].epoch == system.epoch)
@@ -8958,7 +8967,7 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                         requestedQuorumTick.header.randomizeDejavu();
                         requestedQuorumTick.requestQuorumTick.quorumTick.tick = system.tick + 1;
                         setMem(&requestedQuorumTick.requestQuorumTick.quorumTick.voteFlags, sizeof(requestedQuorumTick.requestQuorumTick.quorumTick.voteFlags), 0);
-                        const Tick* tsCompTicks = ts.ticks.getByTickInCurrentEpoch(system.tick + 1);
+                        auto tsCompTicks = ts.ticks.getByTickInCurrentEpoch(system.tick + 1);
                         for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
                         {
                             if (tsCompTicks[i].epoch == system.epoch)

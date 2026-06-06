@@ -34,6 +34,62 @@ inline constexpr const T& min(const T& left, const T& right)
 static constexpr int SWAPVM_IO_MAX_ATTEMPTS = 5;
 static constexpr unsigned int SWAPVM_IO_INITIAL_DELAY_MS = 100;
 
+// RAII handle returned by SwapVirtualMemory's pinned accessors. While the handle is alive it
+// keeps the underlying cache page "pinned" (non-evictable), so the raw pointer it wraps stays
+// valid across other operations on the same VM and across concurrent threads. The pin is
+// released in the destructor (scope exit).
+//
+// It implicitly converts to T* and supports ->, so existing call sites keep compiling; the only
+// required change is the *declaration*: `T* p = vm.getByX()` / `auto* p = ...` must become
+// `auto p = ...` (or a named PinnedPtr<T>), so the handle — not a bare pointer — owns the pin
+// for the intended scope. (`auto* p` would copy out the raw pointer and immediately drop the
+// pin, leaving p dangling.) For non-swap builds it just wraps the raw pointer with a no-op
+// destructor.
+template <typename T>
+class PinnedPtr
+{
+    T* ptr_ = nullptr;
+    void* owner_ = nullptr;                  // SwapVirtualMemory instance; null for raw/non-swap
+    void (*unpin_)(void*, int) = nullptr;    // null => nothing to release
+    int slot_ = -1;
+public:
+    PinnedPtr() = default;
+    // raw / non-swap: no pin
+    PinnedPtr(T* p) : ptr_(p) {}
+    // pinned (swap)
+    PinnedPtr(T* p, void* owner, void (*unpin)(void*, int), int slot)
+        : ptr_(p), owner_(owner), unpin_(unpin), slot_(slot) {}
+    ~PinnedPtr() { if (unpin_) unpin_(owner_, slot_); }
+
+    PinnedPtr(const PinnedPtr&) = delete;
+    PinnedPtr& operator=(const PinnedPtr&) = delete;
+    PinnedPtr(PinnedPtr&& o) noexcept
+        : ptr_(o.ptr_), owner_(o.owner_), unpin_(o.unpin_), slot_(o.slot_)
+    { o.ptr_ = nullptr; o.owner_ = nullptr; o.unpin_ = nullptr; o.slot_ = -1; }
+    PinnedPtr& operator=(PinnedPtr&& o) noexcept
+    {
+        if (this != &o)
+        {
+            if (unpin_) unpin_(owner_, slot_);
+            ptr_ = o.ptr_; owner_ = o.owner_; unpin_ = o.unpin_; slot_ = o.slot_;
+            o.ptr_ = nullptr; o.owner_ = nullptr; o.unpin_ = nullptr; o.slot_ = -1;
+        }
+        return *this;
+    }
+
+    // Conversion to a bare T* is explicit on purpose: `T* p = handle;` / `auto* p = handle;`
+    // would copy out the raw pointer and immediately drop the pin. Making it explicit turns those
+    // into compile errors, so the compiler points at every declaration that must become `auto`.
+    // Element access / arithmetic / -> keep working so the *body* of each call site is unchanged.
+    explicit operator T*() const { return ptr_; }
+    explicit operator bool() const { return ptr_ != nullptr; }
+    T& operator[](unsigned long long i) const { return ptr_[i]; }
+    T* operator+(unsigned long long i) const { return ptr_ + i; }
+    T* operator->() const { return ptr_; }
+    T& operator*() const { return *ptr_; }
+    T* get() const { return ptr_; }
+};
+
 // an util to use disk as RAM to reduce hardware requirement for qubic core node
 // this VirtualMemory doesn't (yet) support amend operation. That means data stay persisted once they are written
 // template variables meaning:
@@ -714,6 +770,18 @@ private:
     static constexpr unsigned long long INVALID_PAGE_ID = -1;
     static constexpr unsigned long long isPageWrittenToDiskSize = sizeof(bool) * MAX_PAGE;
 
+    // Per-cache-slot pin count. A slot with pinCount > 0 holds a page that some caller still
+    // references via a PinnedPtr and must not be evicted. Guarded by memLock.
+    int pinCount[numCachePage + 1] = {};
+
+    // Monitoring counters (updated under memLock; read lock-free by the stats printer — a
+    // slightly stale read is fine). pinnedHighWater vs numCachePage is the headroom metric.
+    int pinnedNow = 0;                 // slots currently pinned
+    int pinnedHighWater = 0;           // max slots pinned at once since start
+    unsigned long long allPinnedWaits = 0; // times eviction had to wait for a pin (should be 0)
+    unsigned long long cacheHits = 0;  // page accesses served from cache
+    unsigned long long cacheMisses = 0;// page accesses that loaded from disk
+
     // used for offset mode
     T* pageExtraBytesBuffer;
     bool* pageHasExtraBytes; // if this page has extra bytes
@@ -809,11 +877,38 @@ private:
 
         if (cache_page_id != -1)
         {
+            cacheHits++;
             return cache_page_id;
         }
+        cacheMisses++;
         CHAR16 pageName[64];
         generatePageName(pageName, pageId);
         cache_page_id = getMostOutdatedCachePageExceptCurrentPage();
+        // Every eligible slot is currently pinned. Release memLock so the pin holders can make
+        // progress and unpin, then retry. With numCachePage sized above the max number of pages
+        // pinned concurrently this never triggers; the bounded wait just turns a misconfiguration
+        // into a loud failure instead of silent corruption.
+        if (cache_page_id == -1)
+            allPinnedWaits++;
+        int allPinnedWaitMs = 0;
+        while (cache_page_id == -1)
+        {
+            RELEASE(memLock);
+            sleepMilliseconds(1);
+            ACQUIRE(memLock);
+            // page may have been loaded by another thread while we waited
+            int rechecked = findCachePage(pageId);
+            if (rechecked != -1)
+                return rechecked;
+            cache_page_id = getMostOutdatedCachePageExceptCurrentPage();
+            if (++allPinnedWaitMs > 5000) // ~5s
+            {
+                setText(message, L"Fatal: swapVM all cache pages pinned (numCachePage too small) | prefix ");
+                appendText(message, pageDir);
+                logToConsole(message);
+                exit(1);
+            }
+        }
         if (cachePageId[cache_page_id] != INVALID_PAGE_ID)
         {
             writePageToDisk(cachePageId[cache_page_id]);
@@ -914,22 +1009,26 @@ private:
         return cache_page_id;
     }
 
-    // return the most outdated cache page
+    // return the most outdated cache page that is neither the current page nor pinned.
+    // returns -1 if every eligible slot is pinned (caller must wait for a pin to clear).
     int getMostOutdatedCachePageExceptCurrentPage()
     {
-        int min_index = 0;
+        int min_index = -1;
         for (int i = 0; i <= numCachePage; i++)
         {
-            if (lastAccessedTimestamp[i] == 0 && cachePageId[i] != currentPageId)
+            if (cachePageId[i] == currentPageId) // skip current page
+                continue;
+            if (pinCount[i] > 0)                 // skip pinned pages (still referenced)
+                continue;
+            if (lastAccessedTimestamp[i] == 0)
             {
                 return i;
             }
-            if ((lastAccessedTimestamp[i] < lastAccessedTimestamp[min_index]) || (lastAccessedTimestamp[i] == lastAccessedTimestamp[min_index] && cachePageId[i] < cachePageId[min_index]))
+            if (min_index == -1
+                || (lastAccessedTimestamp[i] < lastAccessedTimestamp[min_index])
+                || (lastAccessedTimestamp[i] == lastAccessedTimestamp[min_index] && cachePageId[i] < cachePageId[min_index]))
             {
-                if (cachePageId[i] != currentPageId) // skip current page
-                {
-                    min_index = i;
-                }
+                min_index = i;
             }
         }
         return min_index;
@@ -942,6 +1041,8 @@ public:
 
     void reset() {
         VMBase::reset();
+        setMem(pinCount, sizeof(pinCount), 0);
+        pinnedNow = 0; // pinCount cleared above; cumulative stats (hits/misses/highWater/waits) kept
         setMem(isPageWrittenToDisk, isPageWrittenToDiskSize, 0);
         if (mode == SwapMode::OFFSET_MODE) {
             setMem(pageExtraBytesBuffer, pageExtraBytesBufferSize, 0);
@@ -1039,6 +1140,58 @@ public:
         result = &cache[cache_page_idx][index % pageCapacity];
         RELEASE(memLock);
         return result;
+    }
+
+    // Release a pin taken by getPinned(). Called from PinnedPtr's destructor.
+    void unpinSlot(int slot)
+    {
+        ACQUIRE(memLock);
+        if (slot >= 0 && slot <= (int)numCachePage && pinCount[slot] > 0)
+        {
+            if (--pinCount[slot] == 0)
+                pinnedNow--;
+        }
+        RELEASE(memLock);
+    }
+    static void unpinThunk(void* self, int slot)
+    {
+        ((SwapVirtualMemory*)self)->unpinSlot(slot);
+    }
+
+    // Monitoring getters. Read without memLock on purpose (cheap, stats only — a stale read is
+    // harmless). pinnedHighWater approaching getNumCachePage() means raise numCachePage.
+    int getPinnedNow() const { return pinnedNow; }
+    int getPinnedHighWater() const { return pinnedHighWater; }
+    unsigned long long getAllPinnedWaits() const { return allPinnedWaits; }
+    unsigned long long getCacheHits() const { return cacheHits; }
+    unsigned long long getCacheMisses() const { return cacheMisses; }
+    static constexpr unsigned long long getNumCachePage() { return numCachePage; }
+
+    // Like getPtr(), but returns an RAII handle that pins the page until the handle is destroyed,
+    // so the pointer stays valid across other operations on this VM and across threads.
+    PinnedPtr<T> getPinned(unsigned long long index)
+    requires (mode == SwapMode::INDEX_MODE)
+    {
+        ACQUIRE(memLock);
+        unsigned long long requested_page_id = index / pageCapacity;
+        currentPageId = requested_page_id > currentPageId ? requested_page_id : currentPageId;
+        int cache_page_idx = loadPageToCacheAndTryToPersist(requested_page_id);
+        if (cache_page_idx == -1)
+        {
+            setText(message, L"Fatal Error: Invalid cache page index | Line ");
+            appendNumber(message, __LINE__, true);
+            logToConsole(message);
+            exit(1);
+        }
+        if (pinCount[cache_page_idx]++ == 0)
+        {
+            pinnedNow++;
+            if (pinnedNow > pinnedHighWater)
+                pinnedHighWater = pinnedNow;
+        }
+        T* p = &cache[cache_page_idx][index % pageCapacity];
+        RELEASE(memLock);
+        return PinnedPtr<T>(p, this, &SwapVirtualMemory::unpinThunk, cache_page_idx);
     }
 
     T* operator[](unsigned long long offset)

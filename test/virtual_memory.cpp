@@ -302,6 +302,56 @@ TEST(TestSwapVirtualMemory, TestSwapVirtualMemory_IndexModeRandomAccess) {
     }
 }
 
+// Exercises the pin mechanism (getPinned) and the monitoring counters, and prints the stats
+// line so the format is visible.
+TEST(TestSwapVirtualMemory, TestSwapVirtualMemory_PinStats) {
+    initFilesystem();
+    registerAsynFileIO(NULL);
+
+    struct E { unsigned long long a, b; };
+    // pageCapacity 64, numCachePage 4 -> small cache to force eviction (misses).
+    SwapVirtualMemory<E, wcharToNumber(L"pins"), wcharToNumber(L"data"), 64, 4, INDEX_MODE, 0> vm;
+    vm.init();
+
+    EXPECT_EQ(vm.getPinnedNow(), 0);
+
+    // Hold pins on 3 distinct pages (indices 0, 64, 128 -> pages 0, 1, 2).
+    {
+        auto h0 = vm.getPinned(0);
+        auto h1 = vm.getPinned(64);
+        auto h2 = vm.getPinned(128);
+        h0[0].a = 10; h1[0].a = 20; h2[0].a = 30;
+        EXPECT_EQ(vm.getPinnedNow(), 3);          // 3 slots pinned while handles are alive
+        EXPECT_GE(vm.getPinnedHighWater(), 3);
+    }
+    EXPECT_EQ(vm.getPinnedNow(), 0);              // all released at scope exit
+
+    // A second handle to the SAME page must not double-count slots.
+    {
+        auto a = vm.getPinned(0);
+        auto b = vm.getPinned(5);                 // same page 0
+        EXPECT_EQ(vm.getPinnedNow(), 1);
+    }
+    EXPECT_EQ(vm.getPinnedNow(), 0);
+
+    // Touch many distinct pages (> cache slots) to generate cache misses; no pin ever leaks.
+    for (int i = 0; i < 200; i++) {
+        auto h = vm.getPinned((unsigned long long)i * 64);
+        h[0].b = (unsigned long long)i;
+        EXPECT_EQ(h[0].b, (unsigned long long)i);
+    }
+    EXPECT_EQ(vm.getPinnedNow(), 0);
+    EXPECT_GT(vm.getCacheMisses(), 0ull);
+    EXPECT_EQ(vm.getAllPinnedWaits(), 0ull);      // adequately sized -> never waits
+
+    printf("[pinstats] pinnedNow=%d highWater=%d allPinnedWaits=%llu hits=%llu misses=%llu cap=%llu\n",
+           vm.getPinnedNow(), vm.getPinnedHighWater(),
+           (unsigned long long)vm.getAllPinnedWaits(),
+           (unsigned long long)vm.getCacheHits(),
+           (unsigned long long)vm.getCacheMisses(),
+           (unsigned long long)vm.getNumCachePage());
+}
+
 TEST(TestSwapVirtualMemory, TestSwapVirtualMemory_IndexModeLinearAccess) {
     initFilesystem();
     registerAsynFileIO(NULL);

@@ -639,7 +639,7 @@ public:
         // Rebuild the transaction digest hashmap
         for (auto i = metaData.tickBegin; i < metaData.tickEnd && rebuildTxHashmap; i++)
         {
-            TickData *tickData = TickDataAccess::getByTickIfNotEmpty(i);
+            auto tickData = TickDataAccess::getByTickIfNotEmpty(i);
             if (!tickData)
             {
                 continue;
@@ -696,6 +696,47 @@ public:
 #else
         return tickDataSize;
 #endif
+    }
+
+#ifdef USE_SWAP
+    // Format one swap VM's pin/cache stats into a single console line.
+    template <class VM>
+    static void formatSwapVmStat(const CHAR16* name, const VM& vm)
+    {
+        CHAR16 m[256];
+        setText(m, (CHAR16*)L"[swapvm ");
+        appendText(m, (CHAR16*)name);
+        appendText(m, (CHAR16*)L"] pin ");
+        appendNumber(m, (unsigned long long)vm.getPinnedNow(), false);
+        appendText(m, (CHAR16*)L"/");
+        appendNumber(m, (unsigned long long)VM::getNumCachePage(), false);
+        appendText(m, (CHAR16*)L" hiwater ");
+        appendNumber(m, (unsigned long long)vm.getPinnedHighWater(), false);
+        appendText(m, (CHAR16*)L" allPinnedWaits ");
+        appendNumber(m, vm.getAllPinnedWaits(), false);
+        appendText(m, (CHAR16*)L" hit ");
+        appendNumber(m, vm.getCacheHits(), false);
+        appendText(m, (CHAR16*)L" miss ");
+        appendNumber(m, vm.getCacheMisses(), false);
+        logToConsole(m);
+    }
+#endif
+
+    // Print pin/cache stats for one swap VM, cycling `which` 0..(count-1) across calls so the
+    // main loop can emit one line at a time. Returns the number of swap VMs.
+    static int printSwapVmStat(int which)
+    {
+#ifdef USE_SWAP
+        switch (((which % 5) + 5) % 5)
+        {
+        case 0: formatSwapVmStat((CHAR16*)L"tickData",  tickDataSwapVM); break;
+        case 1: formatSwapVmStat((CHAR16*)L"ticks",     ticksSwapVM); break;
+        case 2: formatSwapVmStat((CHAR16*)L"tx",        tickTransactionsSwapVM); break;
+        case 3: formatSwapVmStat((CHAR16*)L"txOffsets", tickTransactionOffsetsSwapVM); break;
+        case 4: formatSwapVmStat((CHAR16*)L"txDigest",  tickTransactionsDigestSwapVM); break;
+        }
+#endif
+        return 5;
     }
 
     static unsigned long long getTicksSize()
@@ -846,7 +887,7 @@ public:
                 TickData &tickData =  TickStorage::tickData[i];
                 copyMem(oldTickDataPtr + (i - tickIndex), &tickData, sizeof(TickData));
 
-                Tick *tick = TickStorage::ticks.getByTickIndex(i);
+                auto tick = TickStorage::ticks.getByTickIndex(i);
                 for (int j = 0; j < NUMBER_OF_COMPUTORS; j++) {
                     copyMem(oldTicksPtr + ((i - tickIndex) * NUMBER_OF_COMPUTORS) + j, tick + j, sizeof(Tick));
                 }
@@ -863,8 +904,8 @@ public:
 
                 for (unsigned int tickId = oldTickBegin; tickId < oldTickEnd; ++tickId)
                 {
-                    const unsigned long long* tickOffsets = TickTransactionOffsetsAccess::getByTickInCurrentEpoch(tickId);
-                    unsigned long long* tickOffsetsPrevEp = TickTransactionOffsetsAccess::getByTickInPreviousEpoch(tickId);
+                    auto tickOffsets = TickTransactionOffsetsAccess::getByTickInCurrentEpoch(tickId);
+                    auto tickOffsetsPrevEp = TickTransactionOffsetsAccess::getByTickInPreviousEpoch(tickId);
                     for (unsigned int transactionIdx = 0; transactionIdx < NUMBER_OF_TRANSACTIONS_PER_TICK; ++transactionIdx)
                     {
                         const unsigned long long offset = tickOffsets[transactionIdx];
@@ -921,8 +962,8 @@ public:
                 const unsigned long long offsetDelta = (tickTransactionsSizeCurrentEpoch + keepTransactionSizesSum) - nextTickTransactionOffset + oldTickTransactionsPadding;
                 for (unsigned int tickId = oldTickBegin; tickId < oldTickEnd; ++tickId)
                 {
-                    const unsigned long long* tickOffsets = TickTransactionOffsetsAccess::getByTickInCurrentEpoch(tickId);
-                    unsigned long long* tickOffsetsPrevEp = TickTransactionOffsetsAccess::getByTickInPreviousEpoch(tickId);
+                    auto tickOffsets = TickTransactionOffsetsAccess::getByTickInCurrentEpoch(tickId);
+                    auto tickOffsetsPrevEp = TickTransactionOffsetsAccess::getByTickInPreviousEpoch(tickId);
                     for (unsigned int transactionIdx = 0; transactionIdx < NUMBER_OF_TRANSACTIONS_PER_TICK; ++transactionIdx)
                     {
                         const unsigned long long offset = tickOffsets[transactionIdx];
@@ -1048,7 +1089,7 @@ public:
 
         ASSERT(nextTickTransactionOffset >= FIRST_TICK_TRANSACTION_OFFSET);
         ASSERT(nextTickTransactionOffset <= tickTransactionsSizeCurrentEpoch);
-        const unsigned long long* tickOffsets = TickTransactionOffsetsAccess::getByTickInPreviousEpoch(oldTickBegin+2);
+        auto tickOffsets = TickTransactionOffsetsAccess::getByTickInPreviousEpoch(oldTickBegin+2);
         unsigned long long offset = tickOffsets[0];
         // Check previous epoch data
         for (unsigned int tickId = oldTickBegin; tickId < oldTickEnd; ++tickId)
@@ -1059,14 +1100,14 @@ public:
                 print_wstr(L"prevTickData epoch = %d tick = %d", tickData.epoch, tickData.tick);
             }
 
-            const Tick* computorsTicks = TicksAccess::getByTickInPreviousEpoch(tickId);
+            auto computorsTicks = TicksAccess::getByTickInPreviousEpoch(tickId);
             for (unsigned int computor = 0; computor < NUMBER_OF_COMPUTORS; ++computor)
             {
                 const Tick& computorTick = computorsTicks[computor];
                 ASSERT(computorTick.epoch == 0 || (computorTick.tick == tickId && computorTick.computorIndex == computor));
             }
 
-            const unsigned long long* tickOffsets = TickTransactionOffsetsAccess::getByTickInPreviousEpoch(tickId);
+            auto tickOffsets = TickTransactionOffsetsAccess::getByTickInPreviousEpoch(tickId);
             for (unsigned int transactionIdx = 0; transactionIdx < NUMBER_OF_TRANSACTIONS_PER_TICK; ++transactionIdx)
             {
                 unsigned long long offset = tickOffsets[transactionIdx];
@@ -1119,14 +1160,14 @@ public:
                 print_wstr(L"currentTickData epoch = %d tick = %d tickId = %d | index = %d", tickData.epoch, tickData.tick, tickId, TickStorage::tickToIndexCurrentEpoch(tickId));
             }
 
-            const Tick* computorsTicks = TicksAccess::getByTickInCurrentEpoch(tickId);
+            auto computorsTicks = TicksAccess::getByTickInCurrentEpoch(tickId);
             for (unsigned int computor = 0; computor < NUMBER_OF_COMPUTORS; ++computor)
             {
                 const Tick& computorTick = computorsTicks[computor];
                 ASSERT(computorTick.epoch == 0 || (computorTick.tick == tickId && computorTick.computorIndex == computor));
             }
 
-            const unsigned long long* tickOffsets = TickTransactionOffsetsAccess::getByTickInCurrentEpoch(tickId);
+            auto tickOffsets = TickTransactionOffsetsAccess::getByTickInCurrentEpoch(tickId);
             for (unsigned int transactionIdx = 0; transactionIdx < NUMBER_OF_TRANSACTIONS_PER_TICK; ++transactionIdx)
             {
                 unsigned long long offset = tickOffsets[transactionIdx];
@@ -1216,8 +1257,10 @@ public:
             RELEASE(tickDataLock);
         }
 
-        // Return tick if it is stored and not empty, or nullptr otherwise (always checks tick).
-        inline static TickData* getByTickIfNotEmpty(unsigned int tick)
+        // Return a pinned handle to the tick if it is stored and not empty, or a null handle
+        // otherwise (always checks tick). Callers must hold the handle (declare with `auto`,
+        // not `TickData*`) for as long as they use the pointer. See PinnedPtr.
+        inline static PinnedPtr<TickData> getByTickIfNotEmpty(unsigned int tick)
         {
             unsigned int index;
             if (tickInCurrentEpochStorage(tick))
@@ -1225,19 +1268,19 @@ public:
             else if (tickInPreviousEpochStorage(tick))
                 index = tickToIndexPreviousEpoch(tick);
             else
-                return nullptr;
+                return PinnedPtr<TickData>();
 
 #ifdef USE_SWAP
-            TickData* td = tickDataSwapVM.getPtr(index);
+            PinnedPtr<TickData> td = tickDataSwapVM.getPinned(index);
 #else
             qVirtualCommit(tickDataPtr + index, sizeof(TickData));
-            TickData* td = tickDataPtr + index;
+            PinnedPtr<TickData> td(tickDataPtr + index);
 #endif
             // td->epoch == 0: not yet received or temporarily disabled
             // td->epoch == INVALIDATED_TICK_DATA: invalidated by this node
             // in both cases, this data shouldn't be sent out
             if (td->epoch == 0 || td->epoch == INVALIDATED_TICK_DATA)
-                return nullptr;
+                return PinnedPtr<TickData>();
 
             return td;
         }
@@ -1306,40 +1349,32 @@ public:
             RELEASE(ticksLocks[computorIndex]);
         }
 
-        // Return pointer to array of one Tick per computor by tick index independent of epoch (checking index with ASSERT)
-        inline static Tick* getByTickIndex(unsigned int tickIndex)
+        // Return a pinned handle to the array of one Tick per computor by tick index, independent
+        // of epoch (checking index with ASSERT). The page stays resident while the handle is
+        // alive, so callers must hold the handle (declare with `auto`, not `auto*`/`Tick*`). See PinnedPtr.
+        inline static PinnedPtr<Tick> getByTickIndex(unsigned int tickIndex)
         {
             ASSERT(tickIndex < tickDataLength);
 #ifdef USE_SWAP
-            return ticksSwapVM.getPtr((unsigned long long)tickIndex * NUMBER_OF_COMPUTORS);
+            return ticksSwapVM.getPinned((unsigned long long)tickIndex * NUMBER_OF_COMPUTORS);
 #else
             qVirtualCommit(ticksPtr + static_cast<unsigned long long>(tickIndex) * NUMBER_OF_COMPUTORS, NUMBER_OF_COMPUTORS * sizeof(Tick));
-            return ticksPtr + tickIndex * NUMBER_OF_COMPUTORS;
+            return PinnedPtr<Tick>(ticksPtr + (unsigned long long)tickIndex * NUMBER_OF_COMPUTORS);
 #endif
         }
 
-        // Return pointer to array of one Tick per computor in current epoch by tick (checking tick with ASSERT)
-        inline static Tick* getByTickInCurrentEpoch(unsigned int tick)
+        // Return pinned handle to the array of one Tick per computor in current epoch by tick (checking tick with ASSERT)
+        inline static PinnedPtr<Tick> getByTickInCurrentEpoch(unsigned int tick)
         {
             ASSERT(tickInCurrentEpochStorage(tick));
-#ifdef USE_SWAP
-            return ticksSwapVM.getPtr((unsigned long long)tickToIndexCurrentEpoch(tick) * NUMBER_OF_COMPUTORS);
-#else
-            qVirtualCommit(ticksPtr + static_cast<unsigned long long>(tickToIndexCurrentEpoch(tick)) * NUMBER_OF_COMPUTORS, NUMBER_OF_COMPUTORS * sizeof(Tick));
-            return ticksPtr + tickToIndexCurrentEpoch(tick) * NUMBER_OF_COMPUTORS;
-#endif
+            return getByTickIndex(tickToIndexCurrentEpoch(tick));
         }
 
-        // Return pointer to array of one Tick per computor in previous epoch by tick (checking tick with ASSERT)
-        inline static Tick* getByTickInPreviousEpoch(unsigned int tick)
+        // Return pinned handle to the array of one Tick per computor in previous epoch by tick (checking tick with ASSERT)
+        inline static PinnedPtr<Tick> getByTickInPreviousEpoch(unsigned int tick)
         {
             ASSERT(tickInPreviousEpochStorage(tick));
-#ifdef USE_SWAP
-            return ticksSwapVM.getPtr((unsigned long long)tickToIndexPreviousEpoch(tick) * NUMBER_OF_COMPUTORS);
-#else
-            qVirtualCommit(ticksPtr + static_cast<unsigned long long>(tickToIndexPreviousEpoch(tick)) * NUMBER_OF_COMPUTORS, NUMBER_OF_COMPUTORS * sizeof(Tick));
-            return ticksPtr + tickToIndexPreviousEpoch(tick) * NUMBER_OF_COMPUTORS;
-#endif
+            return getByTickIndex(tickToIndexPreviousEpoch(tick));
         }
 
         // Get ticks element at offset (checking offset with ASSERT)
@@ -1370,28 +1405,31 @@ public:
     // Struct for structured, convenient access via ".tickTransactionOffsets"
     struct TickTransactionOffsetsAccess
     {
-        // Return pointer to offset array of transactions by tick index independent of epoch (checking index with ASSERT)
-        inline static unsigned long long* getByTickIndex(unsigned int tickIndex)
+        // Return a pinned handle to the offset array of transactions by tick index, independent
+        // of epoch (checking index with ASSERT). The page stays resident while the returned
+        // handle is alive, so callers must hold the handle (declare with `auto`, not `auto*`)
+        // for as long as they use the pointer. See PinnedPtr.
+        inline static PinnedPtr<unsigned long long> getByTickIndex(unsigned int tickIndex)
         {
             ASSERT(tickIndex < tickDataLength);
 #ifdef USE_SWAP
-            return tickTransactionOffsetsSwapVM.getPtr(tickIndex * NUMBER_OF_TRANSACTIONS_PER_TICK);
+            return tickTransactionOffsetsSwapVM.getPinned((unsigned long long)tickIndex * NUMBER_OF_TRANSACTIONS_PER_TICK);
 #else
             qVirtualCommit(tickTransactionOffsetsPtr + (tickIndex * NUMBER_OF_TRANSACTIONS_PER_TICK), NUMBER_OF_TRANSACTIONS_PER_TICK * sizeof(unsigned long long));
-            return tickTransactionOffsetsPtr + (tickIndex * NUMBER_OF_TRANSACTIONS_PER_TICK);
+            return PinnedPtr<unsigned long long>(tickTransactionOffsetsPtr + (tickIndex * NUMBER_OF_TRANSACTIONS_PER_TICK));
 #endif
         }
 
-        // Return pointer to offset array of transactions of tick in current epoch by tick (checking tick with ASSERT)
-        inline static unsigned long long* getByTickInCurrentEpoch(unsigned int tick)
+        // Return pinned handle to the offset array of transactions of tick in current epoch by tick (checking tick with ASSERT)
+        inline static PinnedPtr<unsigned long long> getByTickInCurrentEpoch(unsigned int tick)
         {
             ASSERT(tickInCurrentEpochStorage(tick));
             const unsigned int tickIndex = tickToIndexCurrentEpoch(tick);
             return getByTickIndex(tickIndex);
         }
 
-        // Return pointer to offset array of transactions of tick in previous epoch by tick (checking tick with ASSERT)
-        inline static unsigned long long* getByTickInPreviousEpoch(unsigned int tick)
+        // Return pinned handle to the offset array of transactions of tick in previous epoch by tick (checking tick with ASSERT)
+        inline static PinnedPtr<unsigned long long> getByTickInPreviousEpoch(unsigned int tick)
         {
             ASSERT(tickInPreviousEpochStorage(tick));
             const unsigned int tickIndex = tickToIndexPreviousEpoch(tick);

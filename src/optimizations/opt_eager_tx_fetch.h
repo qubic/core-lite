@@ -24,7 +24,7 @@ static void eagerFetchMissingTransactions(const TickData& tickData)
 {
     const unsigned int tick = tickData.tick;
     const unsigned int tickIndex = ts.tickToIndexCurrentEpoch(tick);
-    const auto* txOffsets = ts.tickTransactionOffsets.getByTickIndex(tickIndex);
+    auto txOffsets = ts.tickTransactionOffsets.getByTickIndex(tickIndex);
     const unsigned int numPending = pendingTxsPool.getNumberOfPendingTickTxs(tick);
 
     // Bit i clear == request transaction i; default all set (= "do not request").

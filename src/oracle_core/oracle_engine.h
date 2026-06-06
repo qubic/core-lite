@@ -620,7 +620,7 @@ public:
         {
             // check that tick storage contains tx at expected position
             ASSERT(ts.tickInCurrentEpochStorage(tx->tick));
-            const uint64_t* tsTickTransactionOffsets = (uint64_t*)ts.tickTransactionOffsets.getByTickInCurrentEpoch(tx->tick);
+            auto tsTickTransactionOffsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(tx->tick);
             const auto* tsTx = ts.tickTransactions.ptr(tsTickTransactionOffsets[txIndex]);
             ASSERT(compareMem(tx, tsTx, tx->totalSize()) == 0);
         }
@@ -1940,7 +1940,7 @@ protected:
         const uint32_t txSlotInTickData = queryMetadata.statusVar.success.revealTxIndex;
         ASSERT(txSlotInTickData < NUMBER_OF_TRANSACTIONS_PER_TICK);
         ASSERT(ts.tickInCurrentEpochStorage(tick));
-        const unsigned long long* tsTickTransactionOffsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(tick);
+        auto tsTickTransactionOffsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(tick);
         const auto* transaction = (OracleReplyRevealTransactionPrefix*)ts.tickTransactions.ptr(tsTickTransactionOffsets[txSlotInTickData]);
         ASSERT(queryMetadata.queryId == transaction->queryId);
         ASSERT(queryMetadata.interfaceIndex < OI::oracleInterfacesCount);
@@ -1997,7 +1997,7 @@ public:
         {
             // check that tick storage contains tx at expected position
             ASSERT(ts.tickInCurrentEpochStorage(transaction->tick));
-            const uint64_t* tsTickTransactionOffsets = (uint64_t*)ts.tickTransactionOffsets.getByTickInCurrentEpoch(transaction->tick);
+            auto tsTickTransactionOffsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(transaction->tick);
             const auto* tsTx = ts.tickTransactions.ptr(tsTickTransactionOffsets[txSlotInTickData]);
             ASSERT(compareMem(transaction, tsTx, transaction->totalSize()) == 0);
         }
@@ -2392,7 +2392,7 @@ protected:
             const uint32_t txSlotInTickData = queryMetadata.typeVar.user.queryTxIndex;
             ASSERT(txSlotInTickData < NUMBER_OF_TRANSACTIONS_PER_TICK);
             ASSERT(ts.tickInCurrentEpochStorage(queryMetadata.queryTick));
-            const uint64_t* tsTickTransactionOffsets = (uint64_t*)ts.tickTransactionOffsets.getByTickInCurrentEpoch(queryMetadata.queryTick);
+            auto tsTickTransactionOffsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(queryMetadata.queryTick);
             const auto* tx = (OracleUserQueryTransactionPrefix*)ts.tickTransactions.ptr(tsTickTransactionOffsets[txSlotInTickData]);
             ASSERT(queryMetadata.interfaceIndex == tx->oracleInterfaceIndex);
             ASSERT(tx->inputSize - OracleUserQueryTransactionPrefix::minInputSize() == querySize);
@@ -2561,7 +2561,7 @@ public:
                 ASSERT(!isZero(oqm.typeVar.user.queryingEntity));
                 ASSERT(oqm.typeVar.user.queryTxIndex < NUMBER_OF_TRANSACTIONS_PER_TICK);
                 ASSERT(ts.tickInCurrentEpochStorage(oqm.queryTick));
-                const uint64_t* tsTickTransactionOffsets = (uint64_t*)ts.tickTransactionOffsets.getByTickInCurrentEpoch(oqm.queryTick);
+                auto tsTickTransactionOffsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(oqm.queryTick);
                 const auto* tx = (OracleUserQueryTransactionPrefix*)ts.tickTransactions.ptr(tsTickTransactionOffsets[oqm.typeVar.user.queryTxIndex]);
                 ASSERT(tx->oracleInterfaceIndex == oqm.interfaceIndex);
                 ASSERT(tx->sourcePublicKey == oqm.typeVar.user.queryingEntity);

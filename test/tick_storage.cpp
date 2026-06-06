@@ -30,7 +30,7 @@ public:
 
         unsigned int transactionSize = transaction->totalSize();
 
-        auto* offsets = tickTransactionOffsets.getByTickInCurrentEpoch(tick);
+        auto offsets = tickTransactionOffsets.getByTickInCurrentEpoch(tick);
         if (nextTickTransactionOffset + transactionSize <= tickTransactions.storageSpaceCurrentEpoch)
         {
             EXPECT_EQ(offsets[transactionIdx], 0);
@@ -51,7 +51,7 @@ public:
         td.tick = tick;
 
         // add computor ticks
-        Tick* computorTicks = ticks.getByTickInCurrentEpoch(tick);
+        auto computorTicks = ticks.getByTickInCurrentEpoch(tick);
         for (int i = 0; i < NUMBER_OF_COMPUTORS; ++i)
         {
             computorTicks[i].epoch = 1234;
@@ -90,7 +90,7 @@ public:
         EXPECT_EQ(td.tick, tick);
 
         // check computor ticks
-        Tick* computorTicks = previousEpoch ? ticks.getByTickInPreviousEpoch(tick) : ticks.getByTickInCurrentEpoch(tick);
+        auto computorTicks = previousEpoch ? ticks.getByTickInPreviousEpoch(tick) : ticks.getByTickInCurrentEpoch(tick);
         for (int i = 0; i < NUMBER_OF_COMPUTORS; ++i)
         {
             EXPECT_EQ((int)computorTicks[i].epoch, (int)1234);
@@ -101,7 +101,7 @@ public:
 
         // check transactions of tick
         {
-            const auto* offsets = previousEpoch ? tickTransactionOffsets.getByTickInPreviousEpoch(tick) : tickTransactionOffsets.getByTickInCurrentEpoch(tick);
+            auto offsets = previousEpoch ? tickTransactionOffsets.getByTickInPreviousEpoch(tick) : tickTransactionOffsets.getByTickInCurrentEpoch(tick);
             unsigned int transactionNum = gen32() % (maxTransactions + 1);
             unsigned int orderMode = gen32() % 2;
             unsigned int transactionSlot;

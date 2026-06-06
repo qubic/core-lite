@@ -172,10 +172,10 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
         unsigned int tickNumber = (*json)["tickNumber"].asUInt64();
         TickData localTickData;
         TickStorage::tickData.acquireLock();
-        TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tickNumber);
+        auto tickData = TickStorage::tickData.getByTickIfNotEmpty(tickNumber);
         if (tickData)
         {
-            copyMem(&localTickData, tickData, sizeof(TickData));
+            copyMem(&localTickData, tickData.get(), sizeof(TickData));
         }
         TickStorage::tickData.releaseLock();
         if (!tickData)
@@ -285,10 +285,10 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
         for (unsigned int tick = scanLo; tick <= scanHi && !found; tick++)
         {
             TickStorage::tickData.acquireLock();
-            TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
+            auto tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
             if (tickData)
             {
-                copyMem(&localTickData, tickData, sizeof(TickData));
+                copyMem(&localTickData, tickData.get(), sizeof(TickData));
             }
             TickStorage::tickData.releaseLock();
             if (!tickData)
@@ -396,10 +396,10 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
             {
                 TickData localTickData;
                 TickStorage::tickData.acquireLock();
-                TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
+                auto tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
                 if (tickData)
                 {
-                    copyMem(&localTickData, tickData, sizeof(TickData));
+                    copyMem(&localTickData, tickData.get(), sizeof(TickData));
                 }
                 TickStorage::tickData.releaseLock();
                 if (!tickData)
@@ -408,7 +408,7 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
                 }
 
                 ts.tickTransactions.acquireLock();
-                unsigned long long *offsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(tick);
+                auto offsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(tick);
                 for (unsigned int i = 0; i < NUMBER_OF_TRANSACTIONS_PER_TICK; i++)
                 {
                     if (isZero(localTickData.transactionDigests[i]) || !offsets[i])
@@ -604,8 +604,8 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
         {
             TickData localTickData;
             TickStorage::tickData.acquireLock();
-            TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
-            if (tickData) copyMem(&localTickData, tickData, sizeof(TickData));
+            auto tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
+            if (tickData) copyMem(&localTickData, tickData.get(), sizeof(TickData));
             TickStorage::tickData.releaseLock();
             if (!tickData)
             {
@@ -614,7 +614,7 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
             }
 
             ts.tickTransactions.acquireLock();
-            unsigned long long *offsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(tick);
+            auto offsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(tick);
             for (unsigned int i = 0; i < NUMBER_OF_TRANSACTIONS_PER_TICK && hits.size() < limit; i++)
             {
                 if (isZero(localTickData.transactionDigests[i]) || !offsets[i]) continue;
@@ -712,8 +712,8 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
         {
             TickData localTickData;
             TickStorage::tickData.acquireLock();
-            TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
-            if (tickData) copyMem(&localTickData, tickData, sizeof(TickData));
+            auto tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
+            if (tickData) copyMem(&localTickData, tickData.get(), sizeof(TickData));
             TickStorage::tickData.releaseLock();
             if (!tickData) {
                 if (tick == 0) break;
@@ -721,7 +721,7 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
             }
 
             ts.tickTransactions.acquireLock();
-            unsigned long long *offsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(tick);
+            auto offsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(tick);
             for (unsigned int i = 0; i < NUMBER_OF_TRANSACTIONS_PER_TICK; i++)
             {
                 if (isZero(localTickData.transactionDigests[i]) || !offsets[i]) continue;
@@ -806,8 +806,8 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
         for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
         {
             ts.ticks.acquireLock(i);
-            const Tick *src = TickStorage::ticks.getByTickInCurrentEpoch(tickNumber) + i;
-            copyMem(&localCopy[i], src, sizeof(Tick));
+            auto srcBlock = TickStorage::ticks.getByTickInCurrentEpoch(tickNumber);
+            copyMem(&localCopy[i], srcBlock + i, sizeof(Tick));
             ts.ticks.releaseLock(i);
         }
 
@@ -880,10 +880,10 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
         unsigned int tickNumber = (*json)["tickNumber"].asUInt64();
         TickData localTickData;
         TickStorage::tickData.acquireLock();
-        TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tickNumber);
+        auto tickData = TickStorage::tickData.getByTickIfNotEmpty(tickNumber);
         if (tickData)
         {
-            copyMem(&localTickData, tickData, sizeof(TickData));
+            copyMem(&localTickData, tickData.get(), sizeof(TickData));
         }
         TickStorage::tickData.releaseLock();
         if (!tickData)
@@ -898,7 +898,7 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
 
         Json::Value transactions(Json::arrayValue);
         ts.tickTransactions.acquireLock();
-        unsigned long long *offsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(tickNumber);
+        auto offsets = ts.tickTransactionOffsets.getByTickInCurrentEpoch(tickNumber);
         std::vector<std::vector<unsigned char>> txBufs;
         txBufs.reserve(NUMBER_OF_TRANSACTIONS_PER_TICK);
         for (unsigned int i = 0; i < NUMBER_OF_TRANSACTIONS_PER_TICK; i++)
@@ -1637,8 +1637,8 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
                 for (unsigned long long t = tickLo; t <= tickHi && !found; t++)
                 {
                     TickStorage::tickData.acquireLock();
-                    TickData *td = TickStorage::tickData.getByTickIfNotEmpty((unsigned int)t);
-                    if (td) copyMem(&scanLocal, td, sizeof(TickData));
+                    auto td = TickStorage::tickData.getByTickIfNotEmpty((unsigned int)t);
+                    if (td) copyMem(&scanLocal, td.get(), sizeof(TickData));
                     TickStorage::tickData.releaseLock();
                     if (!td) continue;
                     for (unsigned int i = 0; i < NUMBER_OF_TRANSACTIONS_PER_TICK; i++)
@@ -1741,8 +1741,8 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
                     cachedTick = headerTick;
                     setMem(&cachedTickData, sizeof(TickData), 0);
                     TickStorage::tickData.acquireLock();
-                    TickData *td = TickStorage::tickData.getByTickIfNotEmpty(headerTick);
-                    if (td) copyMem(&cachedTickData, td, sizeof(TickData));
+                    auto td = TickStorage::tickData.getByTickIfNotEmpty(headerTick);
+                    if (td) copyMem(&cachedTickData, td.get(), sizeof(TickData));
                     TickStorage::tickData.releaseLock();
 
                     qLogger::tx.getTickLogIdInfo(&cachedTbi, headerTick);
@@ -1751,8 +1751,7 @@ class RpcQueryV2Controller : public HttpController<RpcQueryV2Controller>
                     if (td)
                     {
                         ts.tickTransactions.acquireLock();
-                        unsigned long long *offsetsArr =
-                            ts.tickTransactionOffsets.getByTickInCurrentEpoch(headerTick);
+                        auto offsetsArr = ts.tickTransactionOffsets.getByTickInCurrentEpoch(headerTick);
                         for (unsigned int i = 0; i < NUMBER_OF_TRANSACTIONS_PER_TICK; i++)
                         {
                             if (isZero(cachedTickData.transactionDigests[i]) || !offsetsArr[i])

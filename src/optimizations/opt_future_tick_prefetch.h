@@ -82,7 +82,7 @@ static void requestFutureQuorumTicks(unsigned int prefetchDepth)
         requestedQuorumTick.requestQuorumTick.quorumTick.tick = futureTick;
         setMem(&requestedQuorumTick.requestQuorumTick.quorumTick.voteFlags,
                sizeof(requestedQuorumTick.requestQuorumTick.quorumTick.voteFlags), 0);
-        const Tick* tsCompTicks = ts.ticks.getByTickInCurrentEpoch(futureTick);
+        auto tsCompTicks = ts.ticks.getByTickInCurrentEpoch(futureTick);
         for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
         {
             if (tsCompTicks[i].epoch == system.epoch)

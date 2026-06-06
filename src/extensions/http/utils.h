@@ -100,14 +100,14 @@ public:
         if (forceToBeProcessed)
         {
             TickStorage::tickData.acquireLock();
-            TickData *tmptickData = TickStorage::tickData.getByTickIfNotEmpty(tx->tick);
+            auto tmptickData = TickStorage::tickData.getByTickIfNotEmpty(tx->tick);
             if (!tmptickData)
             {
                 TickStorage::tickData.releaseLock();
                 delete tickData;
                 return jsonObject;
             }
-            copyMem(tickData, tmptickData, sizeof(TickData));
+            copyMem(tickData, tmptickData.get(), sizeof(TickData));
             TickStorage::tickData.releaseLock();
         }
 
@@ -177,10 +177,10 @@ public:
         for (unsigned int tick = system.initialTick; tick <= system.tick; tick++)
         {
             TickStorage::tickData.acquireLock();
-            TickData *tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
+            auto tickData = TickStorage::tickData.getByTickIfNotEmpty(tick);
             if (tickData)
             {
-                copyMem(&localTickData, tickData, sizeof(TickData));
+                copyMem(&localTickData, tickData.get(), sizeof(TickData));
             }
             TickStorage::tickData.releaseLock();
             if (!tickData)

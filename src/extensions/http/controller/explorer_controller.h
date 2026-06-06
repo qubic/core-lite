@@ -58,7 +58,7 @@ public:
         if (start < system.initialTick) start = system.initialTick;
         for (unsigned int t = start; t <= system.tick; t++)
         {
-            TickData* td = TickStorage::tickData.getByTickIfNotEmpty(t);
+            auto td = TickStorage::tickData.getByTickIfNotEmpty(t);
             Json::Value row;
             row["tick"] = t;
             const m256i& leaderKey = broadcastedComputors.computors.publicKeys[t % NUMBER_OF_COMPUTORS];
