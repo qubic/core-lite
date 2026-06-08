@@ -320,6 +320,10 @@
     <ClInclude Include="contracts\QDuel.h">
       <Filter>contracts</Filter>
     </ClInclude>
+
+    <ClInclude Include="contracts\QubicSolanaBridge.h">
+      <Filter>contracts</Filter>
+    </ClInclude>
     <ClInclude Include="contracts\Pulse.h">
       <Filter>contracts</Filter>
     </ClInclude>

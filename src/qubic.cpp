@@ -33,9 +33,11 @@
 // Uncomment to enable.
 // ----------------------------------------------------------------------------
 
-// #define TESTNET
-// #define TESTNET_PREFILL_QUS
-// #define TESTNET_LITE_RAM
+#define TESTNET // UNCOMMENT this line if you want to compile for testnet
+#define TESTNET_PREFILL_QUS // UNCOMMENT this line if you want to send test QUs to computors/custom address at epoch begin
+// this option enables using disk as RAM to reduce hardware requirement for qubic core node
+// it is highly recommended to enable this option if you want to run a full mainnet node on SSD
+// UNCOMMENT this line to enable it
 #define USE_SWAP
 
 // ============================================================================
@@ -63,8 +65,6 @@
 #endif
 
 // #define INCLUDE_CONTRACT_TEST_EXAMPLES
-
-#define NO_GGWP
 
 // contract_def.h needs to be included first to make sure that contracts have minimal access
 #include "contract_core/contract_def.h"
@@ -377,7 +377,7 @@ static bool loadContractStateFiles(CHAR16* directory = NULL, bool forceLoadFromF
 static bool loadContractExecFeeFiles(CHAR16* directory = NULL, bool loadAccumulatedTime = false);
 
 #if ENABLED_LOGGING
-#define PAUSE_BEFORE_CLEAR_MEMORY 1 // Requiring operators to press F10 to clear memory (before switching epoch)
+#define PAUSE_BEFORE_CLEAR_MEMORY 0 // Testnet: auto-transition epochs without waiting for F10
 #else
 #define PAUSE_BEFORE_CLEAR_MEMORY 0
 #endif
@@ -3272,7 +3272,7 @@ static void processTick(unsigned long long processorNumber)
         // Here we still let prevDigests == digests of the last tick of last epoch
         // so that lite client can verify the state of spectrum
 
-#if START_NETWORK_FROM_SCRATCH // only update it if the whole network starts from scratch
+ #if START_NETWORK_FROM_SCRATCH // only update it if the whole network starts from scratch
         // everything starts from files, there is no previous tick of the last epoch
         // thus, prevDigests are the digests of the files
         if (system.epoch == EPOCH)
@@ -7443,6 +7443,11 @@ static bool initialize()
            setContractFeeReserve(i, 10'000'000'000);
         }
     }
+
+    // Testnet bootstrap creates synthetic asset/share state before the first real
+    // tick. Those logs are not part of the live chain and confuse downstream
+    // indexers, so restart logging from a clean tick boundary after bootstrap.
+    logger.reset(system.initialTick);
 #endif
 
     initializeContractErrors();

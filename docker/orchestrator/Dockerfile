@@ -41,7 +41,6 @@ RUN rm -rf build \
         -D BUILD_BINARY:BOOL=ON \
         -D CMAKE_BUILD_TYPE=Release \
         -D ENABLE_AVX512=OFF \
-        -D ONLY_LOGGING=ON \
     && cmake --build . --target Qubic -- -j$(nproc)
 
 # Collect build outputs into a common location

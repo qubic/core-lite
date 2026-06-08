@@ -78,3 +78,56 @@ For a example compilation execute the following commands:
     ```
 
 The output binary will be located at `build/src`
+
+## Running Tests
+
+### Configure (once)
+
+Use a dedicated build directory to avoid mixing test and release artifacts:
+
+```bash
+cd /path/to/core-lite
+
+cmake -S . -B build-test \
+  -DCMAKE_CXX_COMPILER=clang-18 \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DBUILD_TESTS=ON \
+  -DBUILD_BINARY=OFF \
+  -DUSE_SANITIZER=OFF
+```
+
+### Compile
+
+```bash
+cmake --build build-test --target qubic_core_tests -j$(nproc)
+```
+
+> **Known linker issue on Ubuntu (clang-18 + GCC stdlib mix):**
+> The link step may fail with `undefined reference to '__cxa_pure_virtual'` or
+> `vtable for __cxxabiv1::...`. Work around it by appending `-lc++abi -lstdc++`
+> manually after compilation completes:
+>
+> ```bash
+> cd build-test/test
+> eval "$(cat CMakeFiles/qubic_core_tests.dir/link.txt) -lc++abi -lstdc++"
+> ```
+>
+> Prerequisites: `sudo apt install libc++abi-dev libstdc++-12-dev`
+
+### Run all tests
+
+```bash
+./build-test/test/qubic_core_tests
+```
+
+### Run QSB contract tests only
+
+```bash
+./build-test/test/qubic_core_tests --gtest_filter="ContractTestingQSB*"
+```
+
+### Run a single test
+
+```bash
+./build-test/test/qubic_core_tests --gtest_filter="ContractTestingQSB.TestOverrideLock_BlockedAfterMaxAttempts"
+```

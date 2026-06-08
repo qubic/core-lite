@@ -50,6 +50,7 @@
     <ClInclude Include="contracts\Qusino.h" />
     <ClInclude Include="contracts\QReservePool.h" />
     <ClInclude Include="contracts\QThirtyFour.h" />
+    <ClInclude Include="contracts\QubicSolanaBridge.h" />
     <ClInclude Include="contracts\Pulse.h" />
     <ClInclude Include="contracts\Escrow.h" />
     <ClInclude Include="contracts\GGWP.h" />
