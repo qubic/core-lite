@@ -6913,12 +6913,36 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                 tickDataSuits = true;
             }
 
-            // hot fix: force tick 54400007 to be empty
-            if (system.tick == 54400006)
+            // hot fix: force tick 73924308 to be empty
+            if (system.tick == 73924307)
             {
-                // ignore next tick (54400007)
+                // ignore next tick (73924308)
                 targetNextTickDataDigest = m256i::zero();
                 targetNextTickDataDigestIsKnown = true;
+            }
+
+            // recovery: tick 73924308 must be EMPTY, but this passive follower is frozen there.
+            // 261 computors have a stale NON-empty vote for 308 captured in the swap-backed tick
+            // storage, and the node never overwrites a stored vote (see processBroadcastTick, ~L997):
+            // when those computors re-issue corrected (empty) votes, the node drops them and only flags
+            // the computor faulty. Those votes are persisted to the state file and survive restarts, so
+            // the empty tally is pinned at 244 and can never climb to QUORUM.
+            // While stuck here, drop any stored NON-empty vote for 308 so only empty-aligned votes are
+            // retained/re-collected. This does NOT reduce quorum: the node still advances only once
+            // >= QUORUM computors actually vote empty (updateVotesCount at ~L7042 / gate at ~L7071).
+            if (system.tick == 73924308)
+            {
+                for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
+                {
+                    ts.ticks.acquireLock(i);
+                    Tick* voteI = ts.ticks.getByTickInCurrentEpoch(system.tick) + i;
+                    if (voteI->epoch == system.epoch && !isZero(voteI->transactionDigest))
+                    {
+                        voteI->epoch = 0;                                   // drop stale non-empty vote
+                        faultyComputorFlags[i >> 6] &= ~(1ULL << (i & 63)); // let its corrected empty vote back in
+                    }
+                    ts.ticks.releaseLock(i);
+                }
             }
 
             if (!tickDataSuits)
