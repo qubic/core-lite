@@ -212,7 +212,6 @@ namespace tickStorageScan
         unsigned long long offset;
         unsigned int slot;
         m256i expectedDigest;
-        bool hasExpectedDigest;
     };
 
     struct ScanResult
@@ -329,34 +328,24 @@ namespace tickStorageScan
                 storage.tickTransactionOffsets.getByTickInCurrentEpoch(tick);
             for (unsigned int slot = 0; slot < NUMBER_OF_TRANSACTIONS_PER_TICK; slot++)
             {
+                const m256i& expectedDigest = tickData.transactionDigests[slot];
+                if (isZero(expectedDigest))
+                    continue;
+
                 const unsigned long long offset = offsets[slot];
-                const bool hasDigest = !isZero(tickData.transactionDigests[slot]);
                 if (offset == 0)
                 {
-                    if (hasDigest)
-                    {
-                        issues.add(
-                            "transaction-pair", tick, slot,
-                            "digest has no transaction offset");
-                    }
+                    issues.add(
+                        "transaction-pair", tick, slot,
+                        "digest has no transaction offset");
                     continue;
                 }
 
                 TransactionReference reference;
                 reference.offset = offset;
                 reference.slot = slot;
-                reference.expectedDigest = hasDigest
-                    ? tickData.transactionDigests[slot]
-                    : m256i::zero();
-                reference.hasExpectedDigest = hasDigest;
+                reference.expectedDigest = expectedDigest;
                 transactionReferences.push_back(reference);
-
-                if (!hasDigest)
-                {
-                    issues.add(
-                        "transaction-pair", tick, slot,
-                        "offset %llu has no transaction digest", offset);
-                }
             }
 
             std::sort(
@@ -411,20 +400,17 @@ namespace tickStorageScan
                         "offset=%llu storedTick=%u", reference.offset, transaction->tick);
                 }
 
-                if (reference.hasExpectedDigest)
+                m256i transactionDigest;
+                KangarooTwelve(
+                    transaction,
+                    transactionSize,
+                    &transactionDigest,
+                    sizeof(transactionDigest));
+                if (transactionDigest != reference.expectedDigest)
                 {
-                    m256i transactionDigest;
-                    KangarooTwelve(
-                        transaction,
-                        transactionSize,
-                        &transactionDigest,
-                        sizeof(transactionDigest));
-                    if (transactionDigest != reference.expectedDigest)
-                    {
-                        issues.add(
-                            "transaction-digest", tick, reference.slot,
-                            "digest mismatch at offset %llu", reference.offset);
-                    }
+                    issues.add(
+                        "transaction-digest", tick, reference.slot,
+                        "digest mismatch at offset %llu", reference.offset);
                 }
             }
 

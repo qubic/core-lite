@@ -185,6 +185,14 @@ TEST(TickStorageScan, SkipsInvalidatedAndDetectsTransactionCorruption)
     for (unsigned int computor = 0; computor < QUORUM; computor++)
         tickVotes[computor].transactionDigest = tickDataDigest;
 
+    const unsigned long long staleTransactionOffset = ts.nextTickTransactionOffset;
+    Transaction* staleTransaction = ts.tickTransactions(staleTransactionOffset);
+    setMem(staleTransaction, sizeof(Transaction) + SIGNATURE_SIZE, 0);
+    staleTransaction->amount = 1;
+    staleTransaction->tick = tick + 1;
+    ts.tickTransactionOffsets.getByTickInCurrentEpoch(tick)[1] = staleTransactionOffset;
+    ts.nextTickTransactionOffset += staleTransaction->totalSize();
+
     const tickStorageScan::ScanResult cleanResult =
         tickStorageScan::scanLoadedRange(ts, epoch, tick, tick + 1, progress);
     EXPECT_EQ(cleanResult.issues.total, 0ULL);
@@ -196,6 +204,14 @@ TEST(TickStorageScan, SkipsInvalidatedAndDetectsTransactionCorruption)
     EXPECT_EQ(corruptedResult.issues.total, 2ULL);
     EXPECT_EQ(corruptedResult.issues.categoryTotals.at("transaction-tick"), 1ULL);
     EXPECT_EQ(corruptedResult.issues.categoryTotals.at("transaction-digest"), 1ULL);
+
+    transaction->tick = tick;
+    ts.tickTransactionOffsets.getByTickInCurrentEpoch(tick)[0] = 0;
+    const tickStorageScan::ScanResult missingOffsetResult =
+        tickStorageScan::scanLoadedRange(ts, epoch, tick, tick + 1, progress);
+    EXPECT_EQ(missingOffsetResult.issues.total, 1ULL);
+    EXPECT_EQ(missingOffsetResult.transactionsChecked, 0ULL);
+    EXPECT_EQ(missingOffsetResult.issues.categoryTotals.at("transaction-pair"), 1ULL);
 
     ts.beginEpoch(0);
 }
