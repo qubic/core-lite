@@ -9,7 +9,8 @@
 
 // Do NOT share the data of "Private Settings" section with anybody!!!
 
-static std::string OPERATOR = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+// seed: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+static std::string OPERATOR = "BZBQFLLBNCXEMGLOBHUVFTLUPLVCPQUASSILFABOFFBCADQSSUPNWLZBQEXK";
 
 #if defined(TESTNET) && defined(LITE_WASM_SC)
 static unsigned char computorSeeds[][55 + 1] = {
