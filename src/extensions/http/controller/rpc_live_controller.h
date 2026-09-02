@@ -704,6 +704,19 @@ RPC_ROUTE("GET", "/live/v1/debug-trace")
             logs.append(logEntry);
         }
         entry["logs"] = logs;
+
+        Json::Value cheats(Json::arrayValue);
+        for (const auto& cheat : trace.cheats)
+        {
+            Json::Value cheatEntry;
+            cheatEntry["id"] = cheat.id;
+            cheatEntry["part"] = (unsigned int)cheat.part;
+            cheatEntry["size"] = cheat.size;
+            cheatEntry["value"] = (Json::UInt64)cheat.value;
+            cheatEntry["hex"] = cheat.hex;
+            cheats.append(cheatEntry);
+        }
+        entry["cheats"] = cheats;
         entries.append(entry);
     }
     json["entries"] = entries;

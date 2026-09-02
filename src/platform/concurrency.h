@@ -40,6 +40,8 @@ namespace ForkCensus
     {
         std::atomic<int> depth{ 0 };
         std::atomic<const char*> what{ nullptr };
+        // Every LockGuard lock reports the same `what`, so only the address names the offender.
+        std::atomic<const volatile void*> where{ nullptr };
         std::atomic<int> live{ 0 };   // 0 = free/reusable, 1 = owned by a live thread
     };
     inline Slot gSlots[MAX_THREADS];
@@ -99,13 +101,14 @@ namespace ForkCensus
         }
     }
 
-    inline void enter(const char* what)
+    inline void enter(const char* what, const volatile void* where = nullptr)
     {
         if (tlLockSlot < 0)
             claimSlot();
         if (tlLockSlot < 0)
             return;   // registry full (>MAX_THREADS live): best-effort, this thread uncounted
         gSlots[tlLockSlot].what.store(what, std::memory_order_relaxed);
+        gSlots[tlLockSlot].where.store(where, std::memory_order_relaxed);
         gSlots[tlLockSlot].depth.fetch_add(1, std::memory_order_relaxed);
     }
     inline void leave()
@@ -131,6 +134,22 @@ namespace ForkCensus
         }
         return heldDepth < 0 ? 0 : heldDepth;
     }
+    inline const volatile void* offenderAddress()
+    {
+        const int selfSlot = tlLockSlot;
+        int slotCount = gCount.load(std::memory_order_acquire);
+        if (slotCount > MAX_THREADS)
+            slotCount = MAX_THREADS;
+        for (int slotIndex = 0; slotIndex < slotCount; slotIndex++)
+        {
+            if (slotIndex != selfSlot && gSlots[slotIndex].depth.load(std::memory_order_relaxed) > 0)
+            {
+                return gSlots[slotIndex].where.load(std::memory_order_relaxed);
+            }
+        }
+        return nullptr;
+    }
+
     inline const char* offenderName()
     {
         if (gOverflow.load(std::memory_order_acquire))
@@ -157,6 +176,7 @@ namespace ForkCensus
         {
             gSlots[i].depth.store(0, std::memory_order_relaxed);
             gSlots[i].what.store(nullptr, std::memory_order_relaxed);
+            gSlots[i].where.store(nullptr, std::memory_order_relaxed);
             gSlots[i].live.store(0, std::memory_order_relaxed);
         }
         gCount.store(0, std::memory_order_release);
@@ -165,9 +185,9 @@ namespace ForkCensus
     }
 }
 
-inline void forkCensusEnter(const char* what)
+inline void forkCensusEnter(const char* what, const volatile void* where = nullptr)
 {
-    ForkCensus::enter(what);
+    ForkCensus::enter(what, where);
 }
 
 inline void forkCensusLeave()
@@ -185,6 +205,11 @@ inline const char* forkCensusOffender()
     return ForkCensus::offenderName();
 }
 
+inline const volatile void* forkCensusOffenderAddress()
+{
+    return ForkCensus::offenderAddress();
+}
+
 inline void forkCensusResetForChildPromote()
 {
     ForkCensus::resetForChildPromote();
@@ -199,7 +224,7 @@ inline bool gForkCensus = true;
     do { \
         while (_InterlockedCompareExchange8(&lock, 1, 0)) \
             _mm_pause(); \
-        forkCensusEnter(#lock " @ " __FILE__); \
+        forkCensusEnter(#lock " @ " __FILE__, &lock); \
     } while (0)
 
 #ifdef NDEBUG
@@ -232,7 +257,7 @@ public:
             while (_InterlockedCompareExchange8(&lock, 1, 0)) \
                 bwt.pause(); \
         } \
-        forkCensusEnter(#lock " @ " __FILE__); \
+        forkCensusEnter(#lock " @ " __FILE__, &lock); \
     } while (0)
 
 #endif
@@ -240,7 +265,7 @@ public:
 // Try to acquire lock and return if successful (without blocking)
 #define TRY_ACQUIRE(lock) \
     (_InterlockedCompareExchange8(&lock, 1, 0) == 0 \
-        ? (forkCensusEnter(#lock " @ " __FILE__), true) \
+        ? (forkCensusEnter(#lock " @ " __FILE__, &lock), true) \
         : false)
 
 // Release lock

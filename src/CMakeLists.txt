@@ -395,6 +395,10 @@ if(IS_CLANG)
 endif()
 target_link_libraries(qubic-cli PRIVATE m)
 
+if(ANT_WALKER)
+    target_compile_definitions(Qubic PRIVATE ANT_WALKER)
+endif()
+
 # Configure linker settings based on compiler
 if(IS_MSVC)
     if(NOT LITE_WASM_SC)

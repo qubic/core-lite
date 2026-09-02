@@ -6,6 +6,7 @@
 
 // The bound colony, not the bare template: these tests check bpp9000's binding as well as the rules.
 #include "../src/mining/ant_colony/ant_colony_bpp9000.h"
+#include "../src/extensions/ant_colony_maintenance.h"
 
 #include <vector>
 
@@ -1145,4 +1146,103 @@ TEST(TestAntColonyExport, BeginEpochClearsIt)
     ASSERT_TRUE(readExport(header, entries));
     EXPECT_EQ(header.entryCount, 0u);
     EXPECT_EQ(header.solutionCount, 0u);
+}
+
+// A child of an existing node committed on trust: no network, the way an AUX node stores one.
+static long long commitChildWithoutAnn(AntColonyBpp9000T* colony, const m256i& owner, const SolutionRef& parentRef, unsigned int score,
+    unsigned int txIdx, unsigned long long nonceSeed, unsigned int tick = 100000)
+{
+    const AntSolutionRecord* parentRec = nullptr;
+    if (colony->tryGetParent(parentRef, &parentRec) != ValidityResult::Valid)
+    {
+        return ANT_INVALID_INDEX;
+    }
+
+    AntCommitInput in;
+    in.pubkey = owner;
+    in.nonce = makeKey(nonceSeed);
+    in.parentRef = parentRef;
+    in.selfRef.tick = tick;
+    in.selfRef.solutionIndexInTick = txIdx;
+    in.anchorTick = tick;
+    in.publishTick = tick;
+
+    const long long landsAt = (long long)colony->solutionCount();
+    if (colony->commit(in, parentRec, score, nullptr, 0, true) != ValidityResult::Valid)
+    {
+        return ANT_INVALID_INDEX;
+    }
+    return landsAt;
+}
+
+// A claim held at fork time has no owner in the child, and the on-demand waiter would spin on it.
+TEST(TestAntColonyMaintenance, PromoteReleasesAnInheritedClaim)
+{
+    AntColonyBpp9000T* colony = freshColony();
+    ASSERT_NE(colony, nullptr) << "colony init failed; needs ~6.2 GB";
+
+    const m256i me = makeKey(41);
+    const long long idx = commitRootChildWithoutAnn(colony, me, 3800, 0, 901);
+    ASSERT_NE(idx, ANT_INVALID_INDEX);
+    const unsigned int slot = (unsigned int)idx;
+
+    ASSERT_EQ(colony->tryClaimAnn(slot), AntColonyBpp9000T::AnnClaimOwned);
+    ASSERT_TRUE(colony->isAnnClaimHeld(slot));
+
+    EXPECT_EQ(AntColonyMaintenance::releaseInheritedClaims(*colony), 1u);
+    EXPECT_FALSE(colony->isAnnClaimHeld(slot));
+    // Retryable, not merely unclaimed: a Busy here is the hang the sweep exists to prevent.
+    EXPECT_EQ(colony->tryClaimAnn(slot), AntColonyBpp9000T::AnnClaimOwned);
+    colony->releaseAnnClaim(slot);
+
+    EXPECT_EQ(AntColonyMaintenance::releaseInheritedClaims(*colony), 0u);
+}
+
+// A rebuild starts from the parent's network, so a record whose parent has none cannot be taken yet.
+TEST(TestAntColonyMaintenance, RebuildableOnlyOnceTheParentHasItsNetwork)
+{
+    AntColonyBpp9000T* colony = freshColony();
+    ASSERT_NE(colony, nullptr) << "colony init failed; needs ~6.2 GB";
+
+    const m256i me = makeKey(42);
+    const long long parentIdx = commitRootChildWithoutAnn(colony, me, 3900, 0, 902);
+    ASSERT_NE(parentIdx, ANT_INVALID_INDEX);
+    SolutionRef parentRef;
+    parentRef.tick = 100000;
+    parentRef.solutionIndexInTick = 0;
+    const long long childIdx = commitChildWithoutAnn(colony, me, parentRef, 3800, 1, 903);
+    ASSERT_NE(childIdx, ANT_INVALID_INDEX);
+
+    // The root is closed-form, so the parent is takeable immediately and the child is not.
+    EXPECT_TRUE(AntColonyMaintenance::isRebuildableNow(*colony, (unsigned int)parentIdx));
+    EXPECT_FALSE(AntColonyMaintenance::isRebuildableNow(*colony, (unsigned int)childIdx));
+
+    AntColonyBpp9000T::Ann ann;
+    setMem(&ann, sizeof(ann), 0);
+    unsigned int annHash;
+    KangarooTwelve(&ann, sizeof(ann), &annHash, sizeof(annHash));
+    ASSERT_EQ(colony->tryClaimAnn((unsigned int)parentIdx), AntColonyBpp9000T::AnnClaimOwned);
+    colony->publishAnn((unsigned int)parentIdx, ann, annHash);
+
+    // Materialised records are done, and the level below is now unblocked.
+    EXPECT_FALSE(AntColonyMaintenance::isRebuildableNow(*colony, (unsigned int)parentIdx));
+    EXPECT_TRUE(AntColonyMaintenance::isRebuildableNow(*colony, (unsigned int)childIdx));
+}
+
+// Two rebuilders must not walk the same record: the claim is what keeps the second one moving on.
+TEST(TestAntColonyMaintenance, AClaimedRecordIsNotOfferedAgain)
+{
+    AntColonyBpp9000T* colony = freshColony();
+    ASSERT_NE(colony, nullptr) << "colony init failed; needs ~6.2 GB";
+
+    const m256i me = makeKey(43);
+    const long long idx = commitRootChildWithoutAnn(colony, me, 3800, 0, 904);
+    ASSERT_NE(idx, ANT_INVALID_INDEX);
+
+    EXPECT_TRUE(AntColonyMaintenance::isRebuildableNow(*colony, (unsigned int)idx));
+    ASSERT_EQ(colony->tryClaimAnn((unsigned int)idx), AntColonyBpp9000T::AnnClaimOwned);
+    EXPECT_FALSE(AntColonyMaintenance::isRebuildableNow(*colony, (unsigned int)idx));
+
+    colony->releaseAnnClaim((unsigned int)idx);
+    EXPECT_TRUE(AntColonyMaintenance::isRebuildableNow(*colony, (unsigned int)idx));
 }

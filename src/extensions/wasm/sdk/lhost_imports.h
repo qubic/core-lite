@@ -44,6 +44,7 @@ LH_IMPORT(abort)          void  lh_abort(unsigned int errorCode);
 LH_IMPORT(burn)           long long lh_burn(long long amount, unsigned int contractIndexBurnedFor);
 LH_IMPORT(epoch)          unsigned int lh_epoch();
 LH_IMPORT(tick)           unsigned int lh_tick();
+LH_IMPORT(initialTick)    unsigned int lh_initialTick();
 LH_IMPORT(numberOfTickTransactions) int lh_numberOfTickTransactions();
 LH_IMPORT(getEntity)      unsigned int lh_getEntity(const void* id32, void* entityOut);
 LH_IMPORT(queryFeeReserve) long long lh_queryFeeReserve(unsigned int contractIndex);
@@ -91,6 +92,7 @@ LH_IMPORT(liteCallFunction) int lh_liteCallFunction(unsigned int calleeIdx, unsi
 LH_IMPORT(liteInvokeProcedure) int lh_liteInvokeProcedure(unsigned int calleeIdx, unsigned int inputType, const void* in, unsigned int inSize, void* out, unsigned int outSize, long long invocationReward);
 LH_IMPORT(liteSetShareholderProposal) unsigned int lh_liteSetShareholderProposal(unsigned int calleeIdx, const void* proposal1024, long long invocationReward);
 LH_IMPORT(liteSetShareholderVotes) unsigned int lh_liteSetShareholderVotes(unsigned int calleeIdx, const void* voteData, unsigned int voteSize, long long invocationReward);
+LH_IMPORT(cheat) long long lh_cheat(unsigned int op, unsigned long long a, unsigned long long b, void* ptr, unsigned int len);
 } // extern "C"
 
 namespace Wasm::Sdk

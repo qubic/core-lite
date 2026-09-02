@@ -13,10 +13,13 @@ int invokeProcedure(const void* callerContext, unsigned int calleeIndex, unsigne
 
 } // namespace Wasm::Sdk
 
-// Calls remain restricted to lower-index contracts.
+// Calls remain restricted to lower-index contracts. The entry-kind and locals-size checks match
+// qpi_macros.h, so a mistake fails to compile here instead of returning a call error at run time.
 #undef CALL_OTHER_CONTRACT_FUNCTION_E
 #define CALL_OTHER_CONTRACT_FUNCTION_E(contractStateType, function, input, output, errorVar) \
     static_assert(contractStateType::__contract_index < CONTRACT_INDEX, "lite: can only call a lower-index contract"); \
+    static_assert(sizeof(contractStateType::function##_locals) <= MAX_SIZE_OF_CONTRACT_LOCALS, #function "_locals size too large"); \
+    static_assert(contractStateType::__is_function_##function, "CALL_OTHER_CONTRACT_FUNCTION_E() cannot be used to invoke procedures."); \
     QPI::InterContractCallError errorVar = (QPI::InterContractCallError)Wasm::Sdk::callFunction( \
         &qpi, contractStateType::__contract_index, contractStateType##_##function##_inputType, \
         &(input), sizeof(input), &(output), sizeof(output))
@@ -28,6 +31,8 @@ int invokeProcedure(const void* callerContext, unsigned int calleeIndex, unsigne
 #undef INVOKE_OTHER_CONTRACT_PROCEDURE_E
 #define INVOKE_OTHER_CONTRACT_PROCEDURE_E(contractStateType, procedure, input, output, invocationReward, errorVar) \
     static_assert(contractStateType::__contract_index < CONTRACT_INDEX, "lite: can only call a lower-index contract"); \
+    static_assert(sizeof(contractStateType::procedure##_locals) <= MAX_SIZE_OF_CONTRACT_LOCALS, #procedure "_locals size too large"); \
+    static_assert(!contractStateType::__is_function_##procedure, "INVOKE_OTHER_CONTRACT_PROCEDURE_E() cannot be used to call functions."); \
     QPI::InterContractCallError errorVar = (QPI::InterContractCallError)Wasm::Sdk::invokeProcedure( \
         &qpi, contractStateType::__contract_index, contractStateType##_##procedure##_inputType, \
         &(input), sizeof(input), &(output), sizeof(output), (invocationReward))

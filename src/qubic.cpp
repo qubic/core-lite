@@ -713,26 +713,44 @@ static bool getAntAnchorDigestForRebuild(unsigned int tick, m256i& out)
     return recomputeAntAnchorDigest(tick, out);
 }
 
+namespace AntWalker
+{
+inline void preemptClaim(unsigned int index);
+}
+
+// A background walker job holds its claim for a whole walk, so a rebuild the tick needs would queue
+// behind it. Asking repeatedly is free: the walker only hands back a job old enough to be stuck.
+static constexpr unsigned int ANT_ANN_CLAIM_PREEMPT_POLLS = 250;
+
+// Waiting costs what the walk costs; walking it here as well would pay that twice.
+static AntColonyBpp9000T::AnnClaim waitForAnnClaim(unsigned int idx)
+{
+    for (unsigned int polls = 1; gAntColony.isAnnClaimHeld(idx); polls++)
+    {
+        sleepMilliseconds(20);
+        if (polls % ANT_ANN_CLAIM_PREEMPT_POLLS == 0)
+        {
+            AntWalker::preemptClaim(idx);
+        }
+    }
+    return gAntColony.tryClaimAnn(idx);
+}
+
 // Rebuilds one record's network. Its parent must already have one, or be the root.
 static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned int idx)
 {
-    const AntColonyBpp9000T::AnnClaim claim = gAntColony.tryClaimAnn(idx);
+    AntColonyBpp9000T::AnnClaim claim = gAntColony.tryClaimAnn(idx);
+    while (claim == AntColonyBpp9000T::AnnClaimBusy)
+    {
+        claim = waitForAnnClaim(idx);
+    }
     if (claim == AntColonyBpp9000T::AnnClaimReady)
     {
         return true;
     }
-    if (claim == AntColonyBpp9000T::AnnClaimInvalid)
+    if (claim != AntColonyBpp9000T::AnnClaimOwned)
     {
         return false;
-    }
-    if (claim == AntColonyBpp9000T::AnnClaimBusy)
-    {
-        // Waiting costs what the walk costs; walking it here as well would pay that twice.
-        while (gAntColony.isAnnClaimHeld(idx))
-        {
-            sleepMilliseconds(20);
-        }
-        return gAntColony.isAnnMaterialised(idx);
     }
 
     // Owned from here on, so every exit below either publishes or releases the claim.
@@ -766,9 +784,15 @@ static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned
         return false;
     }
 
+    // The cache every other scoring path consults, so a rebuild never re-walks a score we hold.
     AntColonyBpp9000T::Ann& childAnn = gAntRebuildChildScratch[processorNumber];
-    const unsigned int rebuiltScore = score->computeAntChildScore(processorNumber, parentAnn,
-        rec->pubkey, rec->nonce, anchorDigest, childAnn);
+    const AntColonyBpp9000T::ReplayKey replayKey = makeAntReplayKey(rec->pubkey, rec->nonce, rec->parentRef, anchorDigest);
+    unsigned int rebuiltScore;
+    if (!gAntColony.tryGetReplayScore(replayKey, rebuiltScore, childAnn))
+    {
+        rebuiltScore = score->computeAntChildScore(processorNumber, parentAnn, rec->pubkey, rec->nonce, anchorDigest, childAnn);
+        gAntColony.putReplayScore(replayKey, rebuiltScore, childAnn);
+    }
 
     // This walk is the computation the record was admitted without. A disagreement means the acceptance
     // was wrong, so publish nothing: a network built for a score no other node holds is worse than none.
@@ -858,6 +882,10 @@ static bool ensureAntRecordAnn(unsigned long long processorNumber, unsigned int 
     const AntSolutionRecord* rec = gAntColony.recordAt(recordIdx);
     return (rec != nullptr) && gAntColony.annOfNonRoot(*rec, out);
 }
+
+#include "extensions/ant_colony_maintenance.h"
+#include "extensions/ant_walker_worker.h"
+#include "extensions/ant_walker_client.h"
 
 // A pool miner's solution, arriving over BroadcastMessage
 static void queueAntSolution(unsigned long long processorNumber, const m256i& computorPublicKey,
@@ -968,8 +996,11 @@ static void antColonyBeginEpoch()
 #ifndef NDEBUG
     gAntDebugPrintBudget = ANT_DEBUG_PRINTS_PER_EPOCH;
 #endif
+    AntWalker::quiesceBegin();
     gAntPendingSolutions.reset();
     gAntColony.beginEpoch(score->currentRandomSeed, system.initialTick);
+    AntWalker::onEpochBegin();
+    AntWalker::quiesceEnd();
     gAntColony.setErrorThreshold((unsigned int)getSolutionThreshold(score_engine::AlgoType::Bpp9000));
 
     // Every identity's root derives from this one value, so a node that seeded differently builds a
@@ -4021,7 +4052,7 @@ static void processTickTransactionAntColonySolution(
     }
     else
     {
-        // A null parent record means root, the scorer derives the submitter's own root, since roots
+        // A null parent record means root, the scorer derives the shared epoch root, since roots
         // are never stored and so cannot be handed in.
         const AntColonyBpp9000T::Ann* parentAnn = nullptr;
         if (parentRec != nullptr)
@@ -8799,7 +8830,9 @@ static bool loadBpp9000Task()
     const unsigned long long headerBytes = sizeof(score_task_file::TaskFileHeader);
     const unsigned long long totalBytes = headerBytes + topoBytes + dataBytes;
 
-    if (totalBytes != BPP9000_TASK_SIZE
+    // The canonical task may carry more samples than the configured sequence length consumes, so the
+    // embedded blob only has to cover totalBytes; anything past that is never read.
+    if (totalBytes > BPP9000_TASK_SIZE
         || save(SCORE_BPP9000_TASK_FILE_NAME, BPP9000_TASK_SIZE, BPP9000_TASK_BYTES, NULL)
             != (long long)BPP9000_TASK_SIZE)
     {
@@ -9483,6 +9516,7 @@ static void deinitialize()
 
     fastTxWindow.deinit();
     gAntPendingSolutions.deinit();
+    AntWalker::stop();
     gAntColony.deinit();
 
     if (score)
@@ -10613,6 +10647,13 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     const bool shadowClean = gShadow.purgeOrphans();
     ts.resetSwapPinsForChildPromote();
     forkCensusResetForChildPromote();
+    const unsigned int releasedAntClaims = AntColonyMaintenance::releaseInheritedClaims(gAntColony);
+    AntWalker::restartAfterPromote();
+    if (releasedAntClaims)
+    {
+        fprintf(stderr, "[FORK] CHILD: released %u inherited ant network claims\n", releasedAntClaims);
+        fflush(stderr);
+    }
     if (!shadowClean)
     {
         forceVerifySolutions = true;
@@ -10804,8 +10845,8 @@ static void bspForkPoint()
         {
             const char* offendingLock = forkCensusOffender();
             ForkStats::onForkSkipped(ForkStats::CENSUS, (unsigned)system.tick, offendingLock ? offendingLock : "?");
-            fprintf(stderr, "[FORK] census: non-BSP thread holds '%s' -> skip fork, run tick %u strict\n", offendingLock ? offendingLock : "?",
-                (unsigned)system.tick);
+            fprintf(stderr, "[FORK] census: non-BSP thread holds '%s' (%p) -> skip fork, run tick %u strict\n", offendingLock ? offendingLock : "?",
+                (const void*)forkCensusOffenderAddress(), (unsigned)system.tick);
             fflush(stderr);
             quiescence.release();
             tickFork::gChildPid = -1;
@@ -10834,6 +10875,7 @@ static void bspForkPoint()
     {
         // CHILD BSP: block until parent's verdict, then become the node.
         quiescence.abandonInChild();
+        AntWalker::closeInheritedSocket();
         close(tickFork::gPipe[1]);
         const auto childCommand = tickForkControl::readChildCommand(tickFork::gPipe[0], (unsigned)system.tick + tickFork::gForkWindowK);
         if (childCommand.action == tickForkControl::ChildAction::Retire)
@@ -11754,6 +11796,8 @@ void processArgs(int argc, const char* argv[]) {
         ("fbas-warmup", "TEST: publish this many valid ant solutions before switching to the --fbas mode", cxxopts::value<int>()->default_value("0"))
         ("fbas-gap", "TEST: minimum ticks between ant publishes; a gap wider than the fork window makes each window retire", cxxopts::value<int>()->default_value("0"))
         ("ant-debug", "Trace ant-colony accepts, over-accepts and network rebuilds (budgeted per epoch)", cxxopts::value<bool>())
+        ("ant-walker-threads", "Ant network walks handed to the walker sidecar (0=off)", cxxopts::value<unsigned int>()->default_value("0"))
+        ("ant-walker-debug", "Trace every ant walker job and result", cxxopts::value<bool>())
 #if defined(__linux__) && !defined(LITE_WASM_SC)
         ("verify-fork-rollback", "TEST: assert fork re-run reproduces quorum digest", cxxopts::value<bool>())
         ("fork-force-fork", "TEST: fork every tick (exercise MATCH path)", cxxopts::value<bool>())
@@ -11973,6 +12017,18 @@ void processArgs(int argc, const char* argv[]) {
         gAntDebugEnabled = true;
         logColorToScreen("INFO", "Ant colony tracing enabled, "
             + std::to_string(ANT_DEBUG_PRINTS_PER_EPOCH) + " lines per epoch");
+    }
+
+    {
+        const unsigned int antWalkerThreads = result["ant-walker-threads"].as<unsigned int>();
+        char antWalkerSocket[128];
+        snprintf(antWalkerSocket, sizeof(antWalkerSocket), "/tmp/qubic-antwalk-%d.sock", httpPort);
+        AntWalker::configure(antWalkerSocket, antWalkerThreads, result.count("ant-walker-debug") > 0);
+        if (antWalkerThreads > 0)
+        {
+            logColorToScreen("INFO", "Ant walker sidecar enabled, " + std::to_string(antWalkerThreads)
+                + " threads, socket " + antWalkerSocket);
+        }
     }
 
     if (result.count("rebuild-tx-hashmap"))
@@ -12379,6 +12435,11 @@ int main(int argc, const char* argv[])
         return tickStorageScan::scan();
     }
 #endif
+    // The walker, not a node. _exit so static destructors never run against uninitialised globals.
+    if (AntWalkerWorker::requested(argc, argv))
+    {
+        _exit(AntWalkerWorker::run(argc, argv));
+    }
 #if defined(__linux__) && !defined(NO_RPC) && !defined(LITE_WASM_SC)
     int rpcProxyExitCode = 0;
     if (runRpcProxyIfRequested(argc, argv, rpcProxyExitCode))
@@ -12395,6 +12456,7 @@ int main(int argc, const char* argv[])
 #if defined(__linux__) && !defined(NO_RPC) && !defined(LITE_WASM_SC)
     startRpcServices();
 #endif
+    AntWalker::start();
 #if defined(LITE_WASM_SC) && !defined(NO_RPC)
     // Wasm testnet serves HTTP in-process; the unix-socket/sidecar stack is compiled out.
     QubicHttpServer::start(httpPort);

@@ -79,6 +79,7 @@ static CallContext createCallContext(const void* context, uint32_t arenaStart, u
     callContext.arenaStart = arenaStart;
     callContext.arenaTop = arenaStart;
     callContext.arenaLimit = arenaLimit;
+    clearCheatWarp();
     return callContext;
 }
 
@@ -88,6 +89,7 @@ static void bindJournal(CallContext& callContext, const EngineSlot& slot)
     callContext.journalBaseOffset = slot.journalBaseOffset;
     callContext.stateOffset = slot.stateOffset;
     callContext.journalHeader = slot.journalBaseOffset ? &slot.journalHeader : nullptr;
+    callContext.guestContextOffset = slot.contextOffset;
 }
 
 static void bindEnvironment(wasm_exec_env_t execEnv, CallContext& callContext)

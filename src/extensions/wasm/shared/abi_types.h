@@ -64,6 +64,7 @@ struct HostServices
     long long (*burn)(const void* ctx, long long amount, unsigned int contractIndexBurnedFor);
     unsigned short (*epoch)(const void* ctx);
     unsigned int   (*tick)(const void* ctx);
+    unsigned int   (*initialTick)(const void* ctx);
     int            (*numberOfTickTransactions)(const void* ctx);
     unsigned char (*getEntity)(const void* ctx, const void* id32, void* entityOut);
     long long (*queryFeeReserve)(const void* ctx, unsigned int contractIndex);
@@ -125,7 +126,25 @@ struct HostServices
     unsigned short (*setShareholderProposal)(const void* callerCtx, unsigned int calleeIdx, const void* proposal1024, long long invocationReward);
     unsigned char (*setShareholderVotes)(const void* callerCtx, unsigned int calleeIdx, const void* voteData, unsigned int voteSize,
         long long invocationReward);
+    // Testnet development aid: opcode-dispatched, negative return on refusal. See CHEAT_OP_* below.
+    long long (*cheat)(const void* ctx, unsigned int op, unsigned long long a, unsigned long long b, void* ptr, unsigned int len);
 };
+
+// Opcodes for HostServices::cheat. Reserved numbers stay listed so an older node answers CHEAT_ERR_UNKNOWN_OP
+// rather than silently accepting a newer client's call.
+#define CHEAT_OP_PRINT      1u
+#define CHEAT_OP_DEAL       2u
+#define CHEAT_OP_WARP_TICK  3u
+#define CHEAT_OP_WARP_EPOCH 4u
+#define CHEAT_OP_PRANK      5u
+#define CHEAT_OP_UNPRANK    6u
+#define CHEAT_OP_WARP_TIME  7u // reserved: needs a calendar inverse the node does not have
+#define CHEAT_OP_SNAPSHOT   8u // reserved: no world-snapshot primitive exists in either runtime
+#define CHEAT_OP_REVERT     9u // reserved, pairs with CHEAT_OP_SNAPSHOT
+
+#define CHEAT_ERR_UNKNOWN_OP    (-1LL)
+#define CHEAT_ERR_DISABLED      (-2LL)
+#define CHEAT_ERR_WRONG_CONTEXT (-3LL)
 
 #define WASM_MAX_USER_ENTRIES 1024
 

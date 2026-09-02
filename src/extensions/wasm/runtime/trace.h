@@ -45,6 +45,16 @@ struct LogTrace
     std::string hex;
 };
 
+// One CC_PRINT argument. size == 0 means the value came through by register instead of by pointer.
+struct CheatEntry
+{
+    unsigned int id = 0;
+    unsigned char part = 0;
+    unsigned int size = 0;
+    unsigned long long value = 0;
+    std::string hex;
+};
+
 struct TraceEntry
 {
     unsigned long long sequence = 0;
@@ -67,6 +77,7 @@ struct TraceEntry
     std::vector<StateRegionTrace> stateDiff;
     std::vector<HostCallTrace> hostCalls;
     std::vector<LogTrace> logs;
+    std::vector<CheatEntry> cheats;
 };
 
 // On by default so a debugger attached after the fact still finds the calls that mattered. This header
@@ -216,6 +227,23 @@ static inline void recordLog(TraceEntry* entry, unsigned char type, const void* 
 
     entry->logs.push_back(LogTrace{
         type, size, hex(bytes, size),
+    });
+}
+
+// The development print channel. Deliberately separate from logs: it consumes no log id, reaches no
+// qLogger, and is stripped from the contract before submission.
+static inline void recordCheat(TraceEntry* entry, unsigned int id, unsigned char part, unsigned long long value, const void* bytes, unsigned int size)
+{
+    if (!entry)
+    {
+        return;
+    }
+
+    // A guest offset outside linear memory resolves to null; record the size but never read from it.
+    const bool readable = bytes && size;
+
+    entry->cheats.push_back(CheatEntry{
+        id, part, size, value, readable ? hex(bytes, size) : std::string(),
     });
 }
 

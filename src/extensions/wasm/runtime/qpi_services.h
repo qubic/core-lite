@@ -203,14 +203,29 @@ static long long burn(const void* context, long long amount, unsigned int contra
     return procedureContext(context)->burn(amount, contractIndex);
 }
 
+// CC_WARP shifts only what the contract observes; the node still commits the real tick and epoch, so a
+// warping contract cannot move consensus. Reset per dispatch, and constant-folded away off testnet.
+#if defined(TESTNET)
+static unsigned int cheatTickOffset = 0;
+static unsigned short cheatEpochOffset = 0;
+#else
+static constexpr unsigned int cheatTickOffset = 0;
+static constexpr unsigned short cheatEpochOffset = 0;
+#endif
+
 static unsigned short epoch(const void* context)
 {
-    return functionContext(context)->epoch();
+    return (unsigned short)(functionContext(context)->epoch() + cheatEpochOffset);
 }
 
 static unsigned int tick(const void* context)
 {
-    return functionContext(context)->tick();
+    return functionContext(context)->tick() + cheatTickOffset;
+}
+
+static unsigned int initialTick(const void* context)
+{
+    return functionContext(context)->initialTick();
 }
 
 static int numberOfTickTransactions(const void* context)
@@ -422,6 +437,133 @@ static unsigned char unsubscribeOracle(const void* context, int subscriptionId)
 static unsigned char distributeDividends(const void* context, long long amountPerShare)
 {
     return (unsigned char)procedureContext(context)->distributeDividends(amountPerShare);
+}
+
+// Mirrors QpiContext's protected layout so a prank can rewrite the caller a contract observes. The
+// size assert turns any drift in QpiContext into a compile error rather than a silent misread.
+struct CheatContextImage
+{
+    unsigned int currentContractIndex;
+    int stackIndex;
+    m256i currentContractId;
+    m256i originator;
+    m256i invocator;
+    long long invocationReward;
+    unsigned char entryPoint;
+};
+static_assert(sizeof(CheatContextImage) == sizeof(QPI::QpiContext), "CheatContextImage out of sync with QPI::QpiContext");
+
+static void clearCheatWarp()
+{
+#if defined(TESTNET)
+    cheatTickOffset = 0;
+    cheatEpochOffset = 0;
+#endif
+}
+
+#if defined(TESTNET)
+// Sets a balance outright rather than transferring, which is the whole point of a deal.
+static long long dealCheatBalance(const m256i& publicKey, long long amount)
+{
+    // The amount arrives as an unsigned word, so a value past the signed range lands here negative.
+    // A negative balance is meaningless, and letting it through would decrease against index -1.
+    if (amount < 0)
+    {
+        return CHEAT_ERR_UNKNOWN_OP;
+    }
+
+    const int index = spectrumIndex(publicKey);
+    const long long current = index < 0 ? 0 : energy(index);
+
+    if (current > amount)
+    {
+        return decreaseEnergy(index, current - amount) ? amount : CHEAT_ERR_WRONG_CONTEXT;
+    }
+
+    if (current < amount)
+    {
+        increaseEnergy(publicKey, amount - current);
+    }
+
+    return amount;
+}
+
+#endif
+
+// Rewrites the guest's copy of the context. The host's own QpiContext is untouched, so the node still
+// bills and attributes the real caller; only what the contract reads changes. Lives here rather than in
+// the vtable because the guest address comes from the adapter, and the vtable signature must mirror the
+// guest's exactly.
+static long long prankCheatCaller(const void* context, void* guestContext, const m256i* caller, long long invocationReward)
+{
+#if defined(TESTNET)
+    const CheatContextImage* hostImage = (const CheatContextImage*)context;
+
+    if (!hostImage || hostImage->entryPoint == (unsigned char)DispatchKind::UserFunction)
+    {
+        return CHEAT_ERR_WRONG_CONTEXT;
+    }
+
+    if (!guestContext)
+    {
+        return CHEAT_ERR_WRONG_CONTEXT;
+    }
+
+    CheatContextImage* image = (CheatContextImage*)guestContext;
+
+    // Unprank restores what the host handed the guest at dispatch, which is the host's own context.
+    image->originator = caller ? *caller : hostImage->originator;
+    image->invocator = caller ? *caller : hostImage->invocator;
+    image->invocationReward = caller ? invocationReward : hostImage->invocationReward;
+    return image->invocationReward;
+#else
+    (void)context;
+    (void)guestContext;
+    (void)caller;
+    (void)invocationReward;
+    return CHEAT_ERR_DISABLED;
+#endif
+}
+
+// Development cheatcodes, opcode-dispatched behind one ABI row so a new one costs no import. Every
+// state-touching opcode is testnet-only, and refusal is always a negative return, never a trap.
+// CHEAT_OP_PRINT and the prank opcodes never reach here: the adapter owns the trace and guest memory.
+static long long cheat(const void* context, unsigned int op, unsigned long long a, unsigned long long b, void* ptr, unsigned int len)
+{
+#if defined(TESTNET)
+    const CheatContextImage* image = (const CheatContextImage*)context;
+
+    // Every opcode below mutates something a read-only call must not touch.
+    if (!image || image->entryPoint == (unsigned char)DispatchKind::UserFunction)
+    {
+        return CHEAT_ERR_WRONG_CONTEXT;
+    }
+
+    switch (op)
+    {
+    case CHEAT_OP_DEAL:
+        return (ptr && len == 32) ? dealCheatBalance(*(const m256i*)ptr, (long long)a) : CHEAT_ERR_UNKNOWN_OP;
+
+    case CHEAT_OP_WARP_TICK:
+        cheatTickOffset += (unsigned int)a;
+        return (long long)cheatTickOffset;
+
+    case CHEAT_OP_WARP_EPOCH:
+        cheatEpochOffset = (unsigned short)(cheatEpochOffset + a);
+        return (long long)cheatEpochOffset;
+
+    default:
+        return CHEAT_ERR_UNKNOWN_OP;
+    }
+#else
+    (void)context;
+    (void)op;
+    (void)a;
+    (void)b;
+    (void)ptr;
+    (void)len;
+    return CHEAT_ERR_DISABLED;
+#endif
 }
 
 } // namespace Wasm::Runtime

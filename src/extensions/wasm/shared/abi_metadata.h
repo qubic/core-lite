@@ -1,7 +1,7 @@
 #pragma once
 
 // Canonical rows shared by WAMR registration and SDK metadata generation.
-#define WASM_ABI_VERSION 5u
+#define WASM_ABI_VERSION 6u
 
 // G/H selects generated or handwritten adapters; Q/I selects QPI-bound or infrastructure calls.
 
@@ -35,6 +35,7 @@
     HQ("burn",                                burn,           w_burn,               "(Ii)I")     \
     GQ("epoch",                               epoch,                                "()i")       \
     GQ("tick",                                tick,                                 "()i")       \
+    GQ("initialTick",                         initialTick,                          "()i")       \
     GQ("numberOfTickTransactions",            numberOfTickTransactions,             "()i")       \
     HQ("getEntity",                           getEntity,      w_getEntity,          "(ii)i")     \
     GQ("queryFeeReserve",                     queryFeeReserve,                      "(i)I")      \
@@ -81,4 +82,5 @@
     HQ("liteCallFunction",                    liteCallFunction,    w_liteCallFunction,           "(iiiiii)i")  \
     HQ("liteInvokeProcedure",                 liteInvokeProcedure, w_liteInvokeProcedure,        "(iiiiiiI)i") \
     HQ("liteSetShareholderProposal",          setShareholderProposal, w_liteSetShareholderProposal, "(iiI)i") \
-    HQ("liteSetShareholderVotes",             setShareholderVotes,    w_liteSetShareholderVotes,    "(iiiI)i")
+    HQ("liteSetShareholderVotes",             setShareholderVotes,    w_liteSetShareholderVotes,    "(iiiI)i") \
+    HQ("cheat",                               cheat,               w_cheat,                      "(iIIii)I")

@@ -16,6 +16,7 @@
 #include <string>
 
 inline char gSidecarPort[16] = "41841";   // node http port -> sidecar listen + unix-socket key
+inline char gAntWalkerThreads[16] = "0";  // matches the node default; 0 keeps the walker unspawned
 
 // Forward a stop signal to the children so the container/service stops promptly.
 static void shimForwardSignal(int sig)
@@ -49,8 +50,38 @@ static pid_t shimForkSidecar()
 #endif
 }
 
+// Re-exec self as the ant walker, a sibling of the node. Spawned here, not by the node, so it
+// outlives a rollback promotion.
+static pid_t shimForkAntWalker()
+{
+    if (std::atoi(gAntWalkerThreads) <= 0)
+        return -1;
+
+    const pid_t supervisorPid = getpid();
+    pid_t walkerPid = fork();
+    if (walkerPid != 0)
+        return walkerPid;
+    prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+    if (getppid() != supervisorPid)
+        _exit(0);
+
+    char self[512];
+    ssize_t pathLength = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (pathLength <= 0)
+        _exit(127);
+    self[pathLength] = 0;
+
+    char socketPath[128];
+    snprintf(socketPath, sizeof(socketPath), "/tmp/qubic-antwalk-%s.sock", gSidecarPort);
+    execl(self, "qubic-ant-walker", "--ant-walk-worker", "--socket", socketPath, "--threads", gAntWalkerThreads, (char*)nullptr);
+    // Not fatal for the node: without a walker the backlog is simply paid on demand as before.
+    fprintf(stderr, "[shim] could not exec the ant walker (%s), running without it\n", strerror(errno));
+    fflush(stderr);
+    _exit(127);
+}
+
 // True while any child other than the sidecar exists (i.e. the node lineage is still alive).
-static bool shimHasNodeChild(pid_t sidecar)
+static bool shimHasNodeChild(pid_t sidecar, pid_t antWalker)
 {
     char path[64];
     snprintf(path, sizeof(path), "/proc/self/task/%d/children", (int)getpid());
@@ -61,7 +92,7 @@ static bool shimHasNodeChild(pid_t sidecar)
     bool hasNodeChild = false;
     while (fscanf(childrenFile, "%d", &childPid) == 1)
     {
-        if (childPid != (int)sidecar)
+        if (childPid != (int)sidecar && childPid != (int)antWalker)
         {
             hasNodeChild = true;
             break;
@@ -85,12 +116,19 @@ static inline void runUnderSupervisor(int argc, const char** argv)
             std::strncpy(gSidecarPort, argv[i + 1], sizeof(gSidecarPort) - 1);
             gSidecarPort[sizeof(gSidecarPort) - 1] = 0;
         }
+        if (std::string(argv[i]) == "--ant-walker-threads" && i + 1 < argc)
+        {
+            std::strncpy(gAntWalkerThreads, argv[i + 1], sizeof(gAntWalkerThreads) - 1);
+            gAntWalkerThreads[sizeof(gAntWalkerThreads) - 1] = 0;
+        }
     }
 
     if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0)   // can't subreap: run node inline
         return;
 
     pid_t sidecar = shimForkSidecar();
+    pid_t antWalker = shimForkAntWalker();
+    int antWalkerRestarts = 0;
 
     pid_t node = fork();
     if (node < 0)
@@ -121,14 +159,30 @@ static inline void runUnderSupervisor(int argc, const char** argv)
             sidecar = shimForkSidecar();                   // RPC must not stay down: restart it
             continue;
         }
+        if (antWalker > 0 && reapedPid == antWalker)
+        {
+            sleep(1);                                      // a squatted socket would hot-loop the respawn
+            // An unrunnable walker would otherwise respawn once a second forever.
+            if (++antWalkerRestarts > 5)
+            {
+                fprintf(stderr, "[shim] ant walker died %d times, leaving it down\n", antWalkerRestarts);
+                fflush(stderr);
+                antWalker = -1;
+                continue;
+            }
+            antWalker = shimForkAntWalker();
+            continue;
+        }
         lastStatus = status;
         if (WIFSIGNALED(status))
             sawSignal = true;
-        if (!shimHasNodeChild(sidecar))
+        if (!shimHasNodeChild(sidecar, antWalker))
             break;                                         // node lineage drained -> shim exits
     }
     if (sidecar > 0)
         kill(sidecar, SIGTERM);
+    if (antWalker > 0)
+        kill(antWalker, SIGTERM);
     _exit(sawSignal ? 1 : (WIFEXITED(lastStatus) ? WEXITSTATUS(lastStatus) : 1));
 }
 

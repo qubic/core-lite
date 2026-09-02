@@ -45,6 +45,11 @@ unsigned int QPI::QpiContextFunctionCall::tick() const
     return lh_tick();
 }
 
+unsigned int QPI::QpiContextFunctionCall::initialTick() const
+{
+    return lh_initialTick();
+}
+
 int QPI::QpiContextFunctionCall::numberOfTickTransactions() const
 {
     return lh_numberOfTickTransactions();

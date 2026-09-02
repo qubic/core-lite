@@ -25,6 +25,8 @@ struct CallContext
     uint32_t journalBaseOffset = 0;
     uint32_t stateOffset = 0;
     const JournalHeader* journalHeader = nullptr;
+    // Where the guest's copy of QpiContext lives, so a prank can rewrite the caller it observes.
+    uint32_t guestContextOffset = 0;
 };
 
 static inline CallContext* activeCallContext(wasm_exec_env_t execEnv)
@@ -248,10 +250,52 @@ static void w_logBytes(wasm_exec_env_t execEnv, uint32_t contractIndex, uint32_t
 
     if (callContext && callContext->trace)
     {
+        // hostServices.logBytes stamps this word for the log store and zeroes it after; the trace must capture the stamped bytes.
+        *((unsigned int*)message) = contractIndex;
         recordLog((TraceEntry*)callContext->trace, (unsigned char)type, message, size);
     }
 
     hostServices.logBytes(contractIndex, (unsigned char)type, message, size);
+}
+
+// CC_PRINT lands on the trace and nowhere else: no log id, no qLogger, no tick log range. Everything
+// that touches node state goes on to hostServices.cheat, which is testnet-only and checks the context.
+static int64_t w_cheat(wasm_exec_env_t execEnv, uint32_t op, uint64_t a, uint64_t b, uint32_t ptrOffset, uint32_t len)
+{
+    CallContext* callContext = activeCallContext(execEnv);
+    // The length says whether there is a payload, not the offset: offset 0 is an ordinary address, and
+    // contract state lives there, so testing the offset drops exactly the reads worth printing.
+    void* payload = len ? nativeAddress(execEnv, ptrOffset) : nullptr;
+
+    if (op == CHEAT_OP_PRINT)
+    {
+        if (callContext && callContext->trace)
+        {
+            recordCheat((TraceEntry*)callContext->trace, (uint32_t)(a >> 8), (unsigned char)(a & 0xff), b, payload, len);
+        }
+
+        return 0;
+    }
+
+    if (!callContext)
+    {
+        return CHEAT_ERR_WRONG_CONTEXT;
+    }
+
+    if (op == CHEAT_OP_PRANK || op == CHEAT_OP_UNPRANK)
+    {
+        void* guestContext = callContext->guestContextOffset ? nativeAddress(execEnv, callContext->guestContextOffset) : nullptr;
+        const bool prank = op == CHEAT_OP_PRANK;
+
+        if (prank && (!payload || len != 32))
+        {
+            return CHEAT_ERR_UNKNOWN_OP;
+        }
+
+        return prankCheatCaller(callContext->ctx, guestContext, prank ? (const m256i*)payload : nullptr, (int64_t)a);
+    }
+
+    return hostServices.cheat(callContext->ctx, op, a, b, payload, len);
 }
 
 static uint32_t w_getEntity(wasm_exec_env_t execEnv, uint32_t idOffset, uint32_t entityOffset)

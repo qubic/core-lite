@@ -28,6 +28,7 @@ static HostServices hostServices =
     .burn = &burn,
     .epoch = &epoch,
     .tick = &tick,
+    .initialTick = &initialTick,
     .numberOfTickTransactions = &numberOfTickTransactions,
     .getEntity = &getEntity,
     .queryFeeReserve = &queryFeeReserve,
@@ -75,6 +76,7 @@ static HostServices hostServices =
     .liteInvokeProcedure = &invokeContractProcedure,
     .setShareholderProposal = &setShareholderProposal,
     .setShareholderVotes = &setShareholderVotes,
+    .cheat = &cheat,
 };
 
 } // namespace Wasm::Runtime
