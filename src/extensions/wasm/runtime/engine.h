@@ -13,7 +13,7 @@ namespace Wasm::Runtime
     const int slotOffset = engineSlotOffset(contractIndex);
     if (slotOffset < 0)
     {
-        return false;
+        return loadFail("slot " + std::to_string(contractIndex) + " is not a dynamic contract slot");
     }
 
     EngineSlot& slot = engineSlots[slotOffset];
@@ -49,6 +49,14 @@ namespace Wasm::Runtime
 
     StateSnapshot previousState;
     captureState(slot, contractIndex, previousState);
+
+    // a staged state must be refused while the resident module can still stay
+    bool stateSeeded = false;
+    if (!adoptStagedState(contractIndex, moduleSet, layout, previousState, stateSeeded))
+    {
+        return false;
+    }
+
     unloadSlot(slot);
 
     adoptModule(slot, moduleSet, exports, layout);
@@ -60,8 +68,15 @@ namespace Wasm::Runtime
     registerSystemProcedures(slot, contractIndex);
 
     slot.loaded = true;
+    slot.stateSeeded = stateSeeded;
     logColorToScreen("INFO", "LITEWASM: slot loaded (" + std::to_string(slot.entryCount) + " user entries)");
     return true;
+}
+
+static inline bool wasStateSeeded(unsigned int contractIndex)
+{
+    const int slotOffset = engineSlotOffset(contractIndex);
+    return slotOffset >= 0 && engineSlots[slotOffset].stateSeeded;
 }
 
 static inline bool hasPendingMigration(unsigned int contractIndex)

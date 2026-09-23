@@ -105,7 +105,8 @@ static inline bool tryReceiveModuleChunk(unsigned long long sessionId, unsigned 
     }
 
     const unsigned long long destinationOffset = (unsigned long long)sequence * WASM_UPLOAD_CHUNK_SIZE;
-    if (!data || sequence != moduleUpload.receivedCount || sequence >= moduleUpload.chunkCount)
+    // a chunk names its own offset, so arrival order is free: the bitmap refuses a repeat and the digest checks the whole.
+    if (!data || sequence >= moduleUpload.chunkCount)
     {
         return false;
     }
@@ -130,6 +131,54 @@ static inline bool tryReceiveModuleChunk(unsigned long long sessionId, unsigned 
     moduleUpload.receivedCount++;
     moduleUpload.lastProgressTick = tick;
     return true;
+}
+
+// what became of the last DEPLOY a client can still act on, served beside the upload progress.
+struct DeployOutcome
+{
+    bool set = false;
+    unsigned long long sessionId = 0;
+    unsigned int slot = 0;
+    unsigned int tick = 0;
+    bool ok = false;
+    char code[24] = {};
+    char message[224] = {};
+};
+
+static DeployOutcome lastDeployOutcome;
+
+static constexpr const char* DEPLOY_CODE_OK = "ok";
+static constexpr const char* DEPLOY_CODE_BAD_SLOT = "bad-slot";
+static constexpr const char* DEPLOY_CODE_ABI_MISMATCH = "abi-mismatch";
+static constexpr const char* DEPLOY_CODE_SESSION_MISMATCH = "session-mismatch";
+static constexpr const char* DEPLOY_CODE_INCOMPLETE = "incomplete";
+static constexpr const char* DEPLOY_CODE_HASH_MISMATCH = "hash-mismatch";
+static constexpr const char* DEPLOY_CODE_NOT_WASM = "not-wasm";
+static constexpr const char* DEPLOY_CODE_LOAD_FAILED = "load-failed";
+
+// a client resends DEPLOY until it sees the slot armed, so a session's verdict stands once given: only an upload
+// that was still missing chunks can end differently.
+static inline bool deployOutcomeReplaces(const DeployOutcome& stored, unsigned long long sessionId)
+{
+    return !stored.set || stored.sessionId != sessionId || strcmp(stored.code, DEPLOY_CODE_INCOMPLETE) == 0;
+}
+
+static inline void storeDeployOutcome(DeployOutcome& stored, unsigned long long sessionId, unsigned int slot, unsigned int tick, const char* code,
+    const std::string& message)
+{
+    if (!deployOutcomeReplaces(stored, sessionId))
+    {
+        return;
+    }
+
+    stored = DeployOutcome{};
+    stored.set = true;
+    stored.sessionId = sessionId;
+    stored.slot = slot;
+    stored.tick = tick;
+    stored.ok = strcmp(code, DEPLOY_CODE_OK) == 0;
+    strncpy(stored.code, code, sizeof(stored.code) - 1);
+    strncpy(stored.message, message.c_str(), sizeof(stored.message) - 1);
 }
 
 static inline unsigned int reservedSlotBase()

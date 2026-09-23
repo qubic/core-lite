@@ -635,6 +635,25 @@ RPC_ROUTE("GET", "/live/v1/dyn-upload")
     }
     json["missing"] = missing;
     json["missingCount"] = missingCount;
+
+    const Wasm::Runtime::DeployOutcome outcome = Wasm::Runtime::deployOutcomeSnapshot();
+    if (outcome.set)
+    {
+        char outcomeSessionId[32];
+        snprintf(outcomeSessionId, sizeof(outcomeSessionId), "%llu", outcome.sessionId);
+        Json::Value lastDeploy;
+        lastDeploy["sessionId"] = std::string(outcomeSessionId);
+        lastDeploy["slot"] = outcome.slot;
+        lastDeploy["tick"] = outcome.tick;
+        lastDeploy["ok"] = outcome.ok;
+        lastDeploy["code"] = std::string(outcome.code);
+        lastDeploy["message"] = std::string(outcome.message);
+        json["lastDeploy"] = lastDeploy;
+    }
+    else
+    {
+        json["lastDeploy"] = Json::Value::null;
+    }
     return jsonResp(json);
 }
 
@@ -875,6 +894,33 @@ RPC_ROUTE("GET", "/live/v1/dev/state-read")
     return jsonResp(json);
 }
 
+// The same slice as raw bytes, for dumps: hex-in-JSON doubles the payload and costs an encode and a decode per byte.
+RPC_ROUTE("GET", "/live/v1/dev/state-bytes")
+{
+    const int slotIndex = std::atoi(req.getParameter("slot").c_str());
+    unsigned long long offset = strtoull(req.getParameter("off").c_str(), nullptr, 10);
+    unsigned long long length = strtoull(req.getParameter("len").c_str(), nullptr, 10);
+    unsigned long long stateSize = 0;
+    if (!rpcResolveContractSlot(slotIndex, stateSize))
+    {
+        Json::Value json;
+        json["message"] = "bad slot";
+        return jsonResp(json, 400);
+    }
+
+    if (offset > stateSize)
+        offset = stateSize;
+    if (offset + length > stateSize)
+        length = stateSize - offset;
+
+    // Same lock-free copy as state-read; a dump spans many requests, so it is only as consistent as a quiet node.
+    RpcResp resp;
+    resp.contentType = "application/octet-stream";
+    resp.body.assign((const char*)contractStates[slotIndex] + offset, (size_t)length);
+    resp.headers.push_back({ "X-State-Size", std::to_string(stateSize) });
+    return resp;
+}
+
 // Canonical K12 digest of a contract's effective state.
 RPC_ROUTE("GET", "/live/v1/dev/contract-digest")
 {
@@ -1013,9 +1059,70 @@ RPC_ROUTE("POST", "/live/v1/dev/contract-source")
     return jsonResp(json);
 }
 
+// stage an initial contract state in ordered chunks: a wasm slot takes it at its next deploy, a native slot at the next tick. total=0 clears.
+RPC_ROUTE("POST", "/live/v1/dev/state-stage")
+{
+    Json::Value json;
+    const int slotIndex = std::atoi(req.getParameter("slot").c_str());
+    const unsigned long long offset = std::strtoull(req.getParameter("off").c_str(), nullptr, 10);
+    const unsigned long long totalBytes = std::strtoull(req.getParameter("total").c_str(), nullptr, 10);
+    const bool nativeSlot = slotIndex >= 1 && slotIndex < (int)WASM_RESERVED_SLOT_BASE && contractStates[slotIndex];
+    const bool wasmSlot = slotIndex >= (int)WASM_RESERVED_SLOT_BASE && slotIndex < (int)(WASM_RESERVED_SLOT_BASE + WASM_RESERVED_SLOT_COUNT);
+
+    json["ok"] = false;
+    if (!nativeSlot && !wasmSlot)
+    {
+        json["message"] = "bad slot";
+        return jsonResp(json, 400);
+    }
+
+    if (totalBytes == 0)
+    {
+        Wasm::Runtime::clearStagedState((unsigned int)slotIndex);
+        json["ok"] = true;
+        json["slot"] = slotIndex;
+        json["received"] = 0;
+        json["total"] = 0;
+        return jsonResp(json);
+    }
+
+    // a native state has one size; a wasm slot's is only known once the module it is staged for loads
+    if (totalBytes > MAX_CONTRACT_STATE_SIZE || (nativeSlot && totalBytes != contractDescriptions[slotIndex].stateSize))
+    {
+        const unsigned long long expectedBytes = nativeSlot ? contractDescriptions[slotIndex].stateSize : MAX_CONTRACT_STATE_SIZE;
+        json["message"] = "total is " + std::to_string(totalBytes) + " bytes, slot " + std::to_string(slotIndex) + (nativeSlot ? " holds exactly " : " holds at most ")
+                          + std::to_string(expectedBytes);
+        return jsonResp(json, 400);
+    }
+
+    unsigned long long receivedBytes = 0;
+    const char* refusal = Wasm::Runtime::stageStateChunk(
+        (unsigned int)slotIndex, offset, totalBytes, (const unsigned char*)req.body.data(), req.body.size(), receivedBytes);
+    if (refusal)
+    {
+        json["message"] = std::string(refusal) + "; expected offset " + std::to_string(receivedBytes);
+        return jsonResp(json, 400);
+    }
+
+    json["ok"] = true;
+    json["slot"] = slotIndex;
+    json["received"] = (Json::UInt64)receivedBytes;
+    json["total"] = (Json::UInt64)totalBytes;
+    return jsonResp(json);
+}
+
 static unsigned int liteDevEpochLastTick()
 {
     return system.initialTick + (unsigned int)TESTNET_EPOCH_DURATION - 1;
+}
+
+static bool liteDevNodeHalted()
+{
+#ifdef LITE_WASM_SC
+    return Wasm::Runtime::faultSnapshot().set;
+#else
+    return false;
+#endif
 }
 
 // Fast-forward with a timeout, then restore the configured tick delay.
@@ -1027,7 +1134,7 @@ static unsigned int liteDevFastForwardTo(unsigned int target, unsigned int timeo
     const unsigned long long savedTickDelay = tickDelay;
     tickDelay = 0;
     const auto startTime = std::chrono::steady_clock::now();
-    while (system.tick < target)
+    while (system.tick < target && !liteDevNodeHalted())
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime);
@@ -1121,7 +1228,7 @@ RPC_ROUTE("GET", "/live/v1/dev/advance-epoch")
     tickDelay = 0;
     forceSwitchEpoch = true;
     const auto startTime = std::chrono::steady_clock::now();
-    while ((unsigned int)system.epoch == startEpoch)
+    while ((unsigned int)system.epoch == startEpoch && !liteDevNodeHalted())
     {
         // Keep the transition moving through its clean-memory wait.
         epochTransitionCleanMemoryFlag = 1;
@@ -1142,6 +1249,100 @@ RPC_ROUTE("GET", "/live/v1/dev/advance-epoch")
     json["initialTick"] = system.initialTick;
     json["switched"] = (unsigned int)system.epoch != startEpoch;
     return jsonResp(json);
+}
+
+// Queries waiting for an oracle machine reply. Only contract queries are listed, because a user query is answered by its sender.
+RPC_ROUTE("GET", "/live/v1/dev/oracle-pending")
+{
+    (void)req;
+    OracleEngine::PendingContractQuery pendingQueries[MAX_SIMULTANEOUS_ORACLE_QUERIES];
+    const unsigned int count = oracleEngine.getPendingContractQueries(pendingQueries, MAX_SIMULTANEOUS_ORACLE_QUERIES);
+
+    Json::Value queries(Json::arrayValue);
+    for (unsigned int idx = 0; idx < count; idx++)
+    {
+        const auto& pending = pendingQueries[idx];
+        if (pending.interfaceIndex >= OI::oracleInterfacesCount)
+            continue;
+
+        const uint16_t querySize = (uint16_t)OI::oracleInterfaces[pending.interfaceIndex].querySize;
+        unsigned char queryData[MAX_ORACLE_QUERY_SIZE];
+        if (!oracleEngine.getOracleQuery(pending.queryId, queryData, querySize))
+            continue;
+
+        Json::Value entry;
+        entry["queryId"] = std::to_string(pending.queryId);
+        entry["slot"] = pending.contractIndex;
+        entry["interfaceIndex"] = pending.interfaceIndex;
+        entry["query"] = base64_encode(queryData, querySize);
+        queries.append(entry);
+    }
+
+    Json::Value json;
+    json["queries"] = queries;
+    return jsonResp(json);
+}
+
+// Answer a pending query as an oracle machine would, so a contract can be developed without one. The commit, quorum and reveal steps still run.
+RPC_ROUTE("POST", "/live/v1/dev/oracle-resolve")
+{
+    Json::Value json;
+    json["ok"] = false;
+    try
+    {
+        auto body = rpcJsonBody(req.body);
+        if (!body)
+        {
+            return rpcErr(3, "Invalid JSON", 400);
+        }
+
+        const int64_t queryId = std::strtoll((*body)["queryId"].asString().c_str(), nullptr, 10);
+        const unsigned int status = (*body)["status"].isNull() ? ORACLE_QUERY_STATUS_SUCCESS : (*body)["status"].asUInt();
+        const auto reply = base64_decode((*body)["reply"].asString());
+
+        struct
+        {
+            OracleMachineReply metadata;
+            unsigned char data[MAX_ORACLE_REPLY_SIZE];
+        } machineReply;
+        setMem(&machineReply, sizeof(machineReply), 0);
+        machineReply.metadata.oracleQueryId = (unsigned long long)queryId;
+
+        if (status == ORACLE_QUERY_STATUS_SUCCESS)
+        {
+            if (reply.size() > MAX_ORACLE_REPLY_SIZE)
+            {
+                json["message"] = "reply too large";
+                return jsonResp(json);
+            }
+            copyMem(machineReply.data, reply.data(), reply.size());
+        }
+        else if (status == ORACLE_QUERY_STATUS_UNRESOLVABLE)
+        {
+            // an oracle machine reports a failure with an error flag; the query then rides out to its own timeout.
+            machineReply.metadata.oracleMachineErrorFlags = ORACLE_FLAG_ORACLE_UNAVAIL;
+        }
+        else
+        {
+            json["message"] = "status must be success or unresolvable";
+            return jsonResp(json);
+        }
+
+        const uint8_t statusBefore = oracleEngine.getOracleQueryStatus(queryId);
+        const unsigned int replySize = (status == ORACLE_QUERY_STATUS_SUCCESS) ? (unsigned int)reply.size() : 0;
+        oracleEngine.processOracleMachineReply(&machineReply.metadata, sizeof(OracleMachineReply) + replySize);
+
+        // the engine returns nothing, so acceptance is read back from the flags it records on the query.
+        const uint16_t statusFlags = oracleEngine.getOracleQueryStatusFlags(queryId);
+        const uint16_t acceptedFlag = (status == ORACLE_QUERY_STATUS_SUCCESS) ? ORACLE_FLAG_REPLY_RECEIVED : ORACLE_FLAG_OM_ERROR_FLAGS;
+        json["ok"] = statusBefore == ORACLE_QUERY_STATUS_PENDING && (statusFlags & acceptedFlag) != 0;
+        json["status"] = oracleEngine.getOracleQueryStatus(queryId);
+        return jsonResp(json);
+    }
+    catch (const std::exception &e)
+    {
+        return rpcErr(-1, "Exception: " + std::string(e.what()), 500);
+    }
 }
 
 #endif // TESTNET

@@ -74,25 +74,60 @@ static bool loadFromBytes(unsigned int contractIndex, const unsigned char* bytes
 static bool isContractLoaded(unsigned int contractIndex);
 static bool hasPendingMigration(unsigned int contractIndex);
 static void runPendingMigration(unsigned int contractIndex);
+static bool wasStateSeeded(unsigned int contractIndex);
+
+// the HTTP thread reads the record while the tick thread writes it.
+static void recordDeployOutcome(unsigned long long sessionId, unsigned int slot, unsigned int tick, const char* code, const std::string& message)
+{
+    TraceLockScope lock;
+    storeDeployOutcome(lastDeployOutcome, sessionId, slot, tick, code, message);
+}
+
+[[maybe_unused]] static DeployOutcome deployOutcomeSnapshot()
+{
+    TraceLockScope lock;
+    return lastDeployOutcome;
+}
 
 [[maybe_unused]] static void deployModule(unsigned long long sessionId, unsigned int targetSlot, const unsigned char* finalHash, unsigned int abiVersion,
     unsigned int /*stateLayoutVersion*/,
-    const char* name)
+    const char* name, unsigned int tick)
 {
+    const auto refuse = [&](const char* code, const std::string& message)
+    {
+        logColorToScreen("ERROR", "LITEDYN: deploy refused; " + message);
+        recordDeployOutcome(sessionId, targetSlot, tick, code, message);
+    };
+
     const int slotOffset = reservedSlotOffset(targetSlot);
     if (slotOffset < 0)
     {
+        refuse(DEPLOY_CODE_BAD_SLOT, "slot " + std::to_string(targetSlot) + " is not a dynamic contract slot");
         return;
     }
 
     if (abiVersion != WASM_ABI_VERSION)
     {
-        logColorToScreen("ERROR", "LITEDYN: unsupported Wasm ABI version " + std::to_string(abiVersion) + "; expected " + std::to_string(WASM_ABI_VERSION));
+        refuse(DEPLOY_CODE_ABI_MISMATCH, "unsupported Wasm ABI version " + std::to_string(abiVersion) + "; expected " + std::to_string(WASM_ABI_VERSION));
         return;
     }
 
-    if (sessionId != moduleUpload.sessionId || !moduleUploadComplete())
+    if (sessionId != moduleUpload.sessionId)
     {
+        refuse(DEPLOY_CODE_SESSION_MISMATCH, "session " + std::to_string(sessionId) + " is not the upload session on this node");
+        return;
+    }
+
+    if (!moduleUpload.active || moduleUpload.receivedCount != moduleUpload.chunkCount)
+    {
+        refuse(DEPLOY_CODE_INCOMPLETE,
+            "upload incomplete (" + std::to_string(moduleUpload.active ? moduleUpload.receivedCount : 0u) + "/" + std::to_string(moduleUpload.chunkCount) + " chunks)");
+        return;
+    }
+
+    if (!moduleUploadComplete())
+    {
+        refuse(DEPLOY_CODE_HASH_MISMATCH, "uploaded bytes do not hash to the digest the upload announced");
         return;
     }
 
@@ -100,6 +135,7 @@ static void runPendingMigration(unsigned int contractIndex);
     {
         if (finalHash[index] != moduleUpload.finalHash[index])
         {
+            refuse(DEPLOY_CODE_HASH_MISMATCH, "deploy names a different module digest than the upload");
             return;
         }
     }
@@ -110,12 +146,16 @@ static void runPendingMigration(unsigned int contractIndex);
 
     if (hasWasmMagic)
     {
+        lastLoadError.clear();
         loadOk = loadFromBytes(targetSlot, moduleUploadBuffer, moduleUpload.totalSize);
-        logToConsole(loadOk ? L"LITEDYN: wasm contract loaded" : L"LITEDYN: ERROR wasm load failed");
+        if (!loadOk)
+        {
+            refuse(DEPLOY_CODE_LOAD_FAILED, lastLoadError.empty() ? "wasm load failed" : lastLoadError);
+        }
     }
     else
     {
-        logToConsole(L"LITEDYN: ERROR upload is not a wasm module ('\\0asm' expected)");
+        refuse(DEPLOY_CODE_NOT_WASM, "upload is not a wasm module ('\\0asm' expected)");
     }
 
     if (!loadOk)
@@ -137,6 +177,12 @@ static void runPendingMigration(unsigned int contractIndex);
     slot.version++;
     logToConsole(L"LITEDYN: Deploy accepted, slot armed");
 
+    // a seeded slot is already constructed, now and for every later redeploy
+    if (wasStateSeeded(targetSlot))
+    {
+        slot.everInitialized = true;
+    }
+
     slot.needsMigrate = hasPendingMigration(targetSlot);
     slot.constructed = slot.everInitialized && !slot.needsMigrate;
     if (slot.needsMigrate)
@@ -145,6 +191,7 @@ static void runPendingMigration(unsigned int contractIndex);
     }
 
     moduleUpload.active = false;
+    recordDeployOutcome(sessionId, targetSlot, tick, DEPLOY_CODE_OK, "slot armed");
 }
 
 
@@ -192,12 +239,50 @@ static void runPendingMigration(unsigned int contractIndex);
             name = reinterpret_cast<const char*>(input + sizeof(message));
         }
 
-        deployModule(message.sessionId, message.targetSlot, message.finalHash, message.abiVersion, message.stateLayoutVersion, name);
+        deployModule(message.sessionId, message.targetSlot, message.finalHash, message.abiVersion, message.stateLayoutVersion, name, tick);
+    }
+}
+
+// native contracts have no deploy to take a staged state, so the tick thread writes it between ticks, where INITIALIZE would run
+static void applyStagedNativeStates()
+{
+    if (!g_nativeStateStaged.exchange(false, std::memory_order_acquire))
+    {
+        return;
+    }
+
+    for (unsigned int contractIndex = 1; contractIndex < WASM_RESERVED_SLOT_BASE; contractIndex++)
+    {
+        unsigned char* stagedBytes = nullptr;
+        unsigned long long stagedSize = 0;
+        if (!takeStagedState(contractIndex, stagedBytes, stagedSize, /*dropIncomplete=*/false))
+        {
+            continue;
+        }
+
+        if (stagedSize == contractDescriptions[contractIndex].stateSize && contractStates[contractIndex])
+        {
+            contractStateLock[contractIndex].acquireWrite();
+            {
+                StateWriteSeqScope writeSeq(true, contractIndex);
+                copyMem(contractStates[contractIndex], stagedBytes, stagedSize);
+            }
+            __markContractStateDirty(contractIndex);
+            contractStateLock[contractIndex].releaseWrite();
+            logColorToScreen("INFO", "LITEDYN: staged state applied idx=" + std::to_string(contractIndex) + " (" + std::to_string(stagedSize) + " bytes)");
+        }
+
+        free(stagedBytes);
     }
 }
 
 static bool hasPendingActivation()
 {
+    if (g_nativeStateStaged.load(std::memory_order_acquire))
+    {
+        return true;
+    }
+
     for (unsigned int slotOffset = 0; slotOffset < WASM_RESERVED_SLOT_COUNT; slotOffset++)
     {
         const ContractSlot& slot = contractSlots[slotOffset];
@@ -212,6 +297,8 @@ static bool hasPendingActivation()
 
 [[maybe_unused]] static void activatePendingContracts()
 {
+    applyStagedNativeStates();
+
     for (unsigned int slotOffset = 0; slotOffset < WASM_RESERVED_SLOT_COUNT; slotOffset++)
     {
         ContractSlot& slot = contractSlots[slotOffset];

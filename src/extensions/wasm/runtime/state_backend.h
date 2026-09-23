@@ -14,6 +14,8 @@
 #endif
 
 #include <atomic>
+#include <cstdlib>
+#include "extensions/fork_census.h"
 
 namespace Wasm::Runtime
 {
@@ -152,6 +154,97 @@ inline unsigned long long contractStateRamUsage()
 #else
     return 0;
 #endif
+}
+
+// an initial state staged over rpc in ordered chunks; an http thread fills it, the tick thread takes it once complete
+struct StagedState
+{
+    unsigned char* bytes = nullptr;
+    unsigned long long totalBytes = 0;
+    unsigned long long receivedBytes = 0;
+};
+
+inline StagedState g_stagedStates[contractCount] = {};
+inline SmartMutex g_stagedStatesLock{ "stagedStatesLock" };
+
+// set when a native slot's staged state completes, so the tick thread only scans when there is work
+inline std::atomic<bool> g_nativeStateStaged{false};
+
+inline void clearStagedState(unsigned int contractIndex)
+{
+    std::lock_guard<SmartMutex> guard(g_stagedStatesLock);
+    StagedState& staged = g_stagedStates[contractIndex];
+
+    free(staged.bytes);
+    staged = StagedState{};
+}
+
+// returns null on success, else why the chunk was refused; offset 0 restarts the slot's staging buffer
+inline const char* stageStateChunk(
+    unsigned int contractIndex, unsigned long long offset, unsigned long long totalBytes, const unsigned char* chunk, unsigned long long chunkBytes,
+    unsigned long long& receivedBytes)
+{
+    std::lock_guard<SmartMutex> guard(g_stagedStatesLock);
+    StagedState& staged = g_stagedStates[contractIndex];
+
+    if (offset == 0)
+    {
+        free(staged.bytes);
+        staged = StagedState{};
+        staged.bytes = (unsigned char*)malloc((size_t)totalBytes);
+        if (!staged.bytes)
+        {
+            return "out of memory";
+        }
+
+        staged.totalBytes = totalBytes;
+    }
+
+    receivedBytes = staged.receivedBytes;
+    if (!staged.bytes || staged.totalBytes != totalBytes || offset != staged.receivedBytes)
+    {
+        return "chunk is out of order";
+    }
+
+    if (chunkBytes > totalBytes - offset)
+    {
+        return "chunk overruns the total";
+    }
+
+    copyMem(staged.bytes + offset, chunk, chunkBytes);
+    staged.receivedBytes += chunkBytes;
+    receivedBytes = staged.receivedBytes;
+
+    if (staged.receivedBytes == staged.totalBytes && contractIndex < WASM_RESERVED_SLOT_BASE)
+    {
+        g_nativeStateStaged.store(true, std::memory_order_release);
+    }
+
+    return nullptr;
+}
+
+// hands a complete staged state to the caller, who frees it; a deploy also drops a half-staged one so it never reaches a later deploy
+inline bool takeStagedState(unsigned int contractIndex, unsigned char*& bytes, unsigned long long& totalBytes, bool dropIncomplete)
+{
+    std::lock_guard<SmartMutex> guard(g_stagedStatesLock);
+    StagedState& staged = g_stagedStates[contractIndex];
+    const bool complete = staged.bytes && staged.receivedBytes == staged.totalBytes;
+
+    if (!complete)
+    {
+        if (dropIncomplete)
+        {
+            free(staged.bytes);
+            staged = StagedState{};
+        }
+
+        return false;
+    }
+
+    bytes = staged.bytes;
+    totalBytes = staged.totalBytes;
+    staged = StagedState{};
+    return true;
 }
 
 } // namespace Wasm::Runtime

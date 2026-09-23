@@ -209,4 +209,13 @@ static inline int _rdrand32_step(unsigned int* output)
 #ifndef _byteswap_ulong
 #define _byteswap_ulong(x) __builtin_bswap32(x)
 #endif
+
+// assets.h getUniverseDigest uses this MSVC scalar intrinsic.
+static inline unsigned char _BitScanForward64(unsigned long* index, unsigned long long mask)
+{
+    if (!mask)
+        return 0;
+    *index = (unsigned long)__builtin_ctzll(mask);
+    return 1;
+}
 #endif

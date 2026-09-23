@@ -31,6 +31,8 @@ struct CallContext
     uint32_t contractIndex = 0;
     uint16_t inputType = 0;
     unsigned char kind = 0;
+    // the context as dispatched, which an unprank restores after a prank rewrote the live one.
+    CheatContextImage realContext = {};
 };
 
 static inline CallContext* activeCallContext(wasm_exec_env_t execEnv)
@@ -294,7 +296,8 @@ static int64_t w_cheat(wasm_exec_env_t execEnv, uint32_t op, uint64_t a, uint64_
         return 0;
     }
 
-    if (!callContext)
+    // every opcode below mutates something a read-only call must not touch.
+    if (!callContext || callContext->kind == (unsigned char)DispatchKind::UserFunction)
     {
         return CHEAT_ERR_WRONG_CONTEXT;
     }
@@ -309,7 +312,7 @@ static int64_t w_cheat(wasm_exec_env_t execEnv, uint32_t op, uint64_t a, uint64_
             return CHEAT_ERR_UNKNOWN_OP;
         }
 
-        return prankCheatCaller(callContext->ctx, guestContext, prank ? (const m256i*)payload : nullptr, (int64_t)a);
+        return prankCheatCaller(callContext->ctx, &callContext->realContext, guestContext, prank ? (const m256i*)payload : nullptr, (int64_t)a);
     }
 
     return hostServices.cheat(callContext->ctx, op, a, b, payload, len);

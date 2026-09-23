@@ -2483,6 +2483,71 @@ public:
         return queryMetadata.status;
     }
 
+    /// ORACLE_FLAG_* bits of a query, which tell whether an oracle machine reply was accepted or rejected.
+    uint16_t getOracleQueryStatusFlags(int64_t queryId) const
+    {
+        // lock for accessing engine data
+        LockGuard lockGuard(lock);
+
+        uint32_t queryIndex;
+        if (!queryIdToIndex->get(queryId, queryIndex) || queryIndex >= oracleQueryCount)
+            return 0;
+
+        return queries[queryIndex].statusFlags;
+    }
+
+    struct PendingContractQuery
+    {
+        int64_t queryId;
+        uint32_t interfaceIndex;
+
+        /// contract the reply is delivered to; the first subscriber for a subscription query
+        uint16_t contractIndex;
+    };
+
+    /// Pending queries started by a contract, so a tool can see what an oracle machine would be asked.
+    unsigned int getPendingContractQueries(PendingContractQuery* pendingQueries, unsigned int maxCount) const
+    {
+        // lock for accessing engine data
+        LockGuard lockGuard(lock);
+
+        unsigned int count = 0;
+        for (unsigned int idx = 0; idx < pendingQueryIndices.numValues && count < maxCount; ++idx)
+        {
+            const uint32_t queryIndex = pendingQueryIndices.values[idx];
+            if (queryIndex >= oracleQueryCount)
+                continue;
+
+            const OracleQueryMetadata& queryMetadata = queries[queryIndex];
+            if (queryMetadata.status != ORACLE_QUERY_STATUS_PENDING)
+                continue;
+
+            if (queryMetadata.type == ORACLE_QUERY_TYPE_CONTRACT_QUERY)
+            {
+                pendingQueries[count].contractIndex = queryMetadata.typeVar.contract.queryingContract;
+            }
+            else if (queryMetadata.type == ORACLE_QUERY_TYPE_CONTRACT_SUBSCRIPTION)
+            {
+                const int32_t* subscriberIndices = getNotifiedSubscriberIndices(queryMetadata);
+                if (!subscriberIndices || queryMetadata.typeVar.subscription.subscriberCount == 0)
+                    continue;
+                const int32_t subscriberIndex = subscriberIndices[0];
+                if (subscriberIndex < 0 || subscriberIndex >= usedSubscriberSlots)
+                    continue;
+                pendingQueries[count].contractIndex = subscribers[subscriberIndex].contractIndex;
+            }
+            else
+            {
+                continue;
+            }
+
+            pendingQueries[count].queryId = queryMetadata.queryId;
+            pendingQueries[count].interfaceIndex = queryMetadata.interfaceIndex;
+            ++count;
+        }
+        return count;
+    }
+
     /// Return pointer to subscription data or nullptr if subscriptionId is invalid. CAUTION: NO LOCKING!
     const OracleSubscription* getOracleSubscription(int32_t subscriptionId) const
     {

@@ -86,7 +86,7 @@
 #define system qsystem
 #endif
 
-// #define NO_QPAY
+// #define NO_QTREAT
 
 // #define INCLUDE_CONTRACT_TEST_EXAMPLES
 
@@ -357,8 +357,6 @@ static unsigned int uniqueCurrentSpectrumDigestCounters[NUMBER_OF_COMPUTORS];
 static unsigned int resourceTestingDigest = 0;
 
 static unsigned int numberOfTransactions = 0;
-
-// spectrumChangeFlags + the dirty-leaf list now live in spectrum/spectrum.h (shared with the transfer sites).
 
 static unsigned long long mainLoopNumerator = 0, mainLoopDenominator = 0;
 static volatile unsigned char contractProcessorState = 0;
@@ -1349,40 +1347,6 @@ static void recomputeComputerDigestFull(m256i& digest)
     getComputerDigest(digest, /*bypassCache=*/true);
 }
 #endif
-
-static void getSpectrumDigest(m256i& digest)
-{
-    unsigned int digestIndex;
-    ACQUIRE(spectrumLock);
-    for (digestIndex = 0; digestIndex < SPECTRUM_CAPACITY; digestIndex++)
-    {
-        if (spectrum[digestIndex].latestIncomingTransferTick == system.tick || spectrum[digestIndex].latestOutgoingTransferTick == system.tick)
-        {
-            KangarooTwelve64To32(&spectrum[digestIndex], &spectrumDigests[digestIndex]);
-            spectrumChangeFlags[digestIndex >> 6] |= (1ULL << (digestIndex & 63));
-        }
-    }
-    unsigned int previousLevelBeginning = 0;
-    unsigned int numberOfLeafs = SPECTRUM_CAPACITY;
-    while (numberOfLeafs > 1)
-    {
-        for (unsigned int i = 0; i < numberOfLeafs; i += 2)
-        {
-            if (spectrumChangeFlags[i >> 6] & (3ULL << (i & 63)))
-            {
-                KangarooTwelve64To32(&spectrumDigests[previousLevelBeginning + i], &spectrumDigests[digestIndex]);
-                spectrumChangeFlags[i >> 6] &= ~(3ULL << (i & 63));
-                spectrumChangeFlags[i >> 7] |= (1ULL << ((i >> 1) & 63));
-            }
-            digestIndex++;
-        }
-        previousLevelBeginning += numberOfLeafs;
-        numberOfLeafs >>= 1;
-    }
-    spectrumChangeFlags[0] = 0;
-    digest = spectrumDigests[(SPECTRUM_CAPACITY * 2 - 1) - 1];
-    RELEASE(spectrumLock);
-}
 
 static void processExchangePublicPeers(Peer* peer, RequestResponseHeader* header)
 {
@@ -5256,59 +5220,10 @@ static void processTick(unsigned long long processorNumber)
     TickBench::add(TickBench::END_TICK, _bEndTickStart, __rdtsc());
     PROFILE_SCOPE_END();
 
-    PROFILE_NAMED_SCOPE_BEGIN("processTick(): get spectrum digest");
     unsigned long long _bDigSpecStart = __rdtsc();
-    unsigned int digestIndex;
-    ACQUIRE(spectrumLock);
-    if (spectrumDirtyOverflow)
-    {
-        // Fallback (rare): too many distinct leaves changed this tick — discover them by full scan.
-        for (digestIndex = 0; digestIndex < SPECTRUM_CAPACITY; digestIndex++)
-        {
-            if (spectrum[digestIndex].latestIncomingTransferTick == system.tick || spectrum[digestIndex].latestOutgoingTransferTick == system.tick)
-            {
-                KangarooTwelve64To32(&spectrum[digestIndex], &spectrumDigests[digestIndex]);
-                spectrumChangeFlags[digestIndex >> 6] |= (1ULL << (digestIndex & 63));
-            }
-        }
-    }
-    else
-    {
-        // Re-hash only the leaves touched this tick; their flags were set by markSpectrumDirty().
-        for (unsigned int k = 0; k < spectrumDirtyCount; k++)
-        {
-            const unsigned int idx = spectrumDirtyIndices[k];
-            KangarooTwelve64To32(&spectrum[idx], &spectrumDigests[idx]);
-        }
-    }
-    // Parent write index is computed from i (writeBase + i/2), decoupled from a running
-    // counter, so a whole clean 64-bit flag word (32 pairs) can be skipped at once — the per-tick
-    // dirty set is tiny, so the Merkle walk becomes ~O(dirty) instead of O(SPECTRUM_CAPACITY).
-    unsigned int previousLevelBeginning = 0;
-    unsigned int writeBase = SPECTRUM_CAPACITY; // Merkle walk writes parent nodes starting at this index
-    unsigned int numberOfLeafs = SPECTRUM_CAPACITY;
-    while (numberOfLeafs > 1)
-    {
-        for (unsigned int i = 0; i < numberOfLeafs; i += 2)
-        {
-            if ((i & 63) == 0 && spectrumChangeFlags[i >> 6] == 0) { i += 62; continue; } // skip 32 clean pairs
-            if (spectrumChangeFlags[i >> 6] & (3ULL << (i & 63)))
-            {
-                KangarooTwelve64To32(&spectrumDigests[previousLevelBeginning + i], &spectrumDigests[writeBase + (i >> 1)]);
-                spectrumChangeFlags[i >> 6] &= ~(3ULL << (i & 63));
-                spectrumChangeFlags[i >> 7] |= (1ULL << ((i >> 1) & 63));
-            }
-        }
-        previousLevelBeginning += numberOfLeafs;
-        writeBase += (numberOfLeafs >> 1);
-        numberOfLeafs >>= 1;
-    }
-    spectrumChangeFlags[0] = 0;
-    spectrumDirtyCount = 0;        // consumed — ready for next tick
-    spectrumDirtyOverflow = false;
-
-    etalonTick.saltedSpectrumDigest = spectrumDigests[(SPECTRUM_CAPACITY * 2 - 1) - 1];
+    getSpectrumDigest(etalonTick.saltedSpectrumDigest);
 #ifdef VERIFY_SPECTRUM_DIGEST
+    ACQUIRE(spectrumLock);
     // Self-check: recompute the whole tree from scratch and assert the incremental result matches.
     {
         const m256i _dirtyRoot = etalonTick.saltedSpectrumDigest;
@@ -5330,10 +5245,9 @@ static void processTick(unsigned long long processorNumber)
             while (true) { logToConsole(message); bs->Stall(1'000'000); }
         }
     }
-#endif
     RELEASE(spectrumLock);
+#endif
     TickBench::add(TickBench::DIGEST_SPECTRUM, _bDigSpecStart, __rdtsc());
-    PROFILE_SCOPE_END();
 
     {
         TickBench::Scope _bDigUC(TickBench::DIGEST_UNIVERSE_COMPUTER);

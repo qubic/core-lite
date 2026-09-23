@@ -113,6 +113,13 @@ static uint32_t callWithU32Argument(wasm_exec_env_t execEnv, wasm_function_inst_
     return arguments[0];
 }
 
+// a row's id indexes contractSystemProcedures, which the node walks by SystemProcedureID.
+#define WASM_ASSERT_SYSTEM_PROCEDURE_ROW(symbol, id, method, emptyMember) \
+    static_assert((unsigned int)::symbol == id, "ABI row id differs from SystemProcedureID::" #symbol);
+WASM_SYSTEM_PROCEDURE_ROWS(WASM_ASSERT_SYSTEM_PROCEDURE_ROW)
+#undef WASM_ASSERT_SYSTEM_PROCEDURE_ROW
+static_assert((unsigned int)::contractSystemProcedureCount == (unsigned int)WASM_SYSTEM_PROCEDURE_COUNT, "ABI rows do not cover SystemProcedureID");
+
 static void registerSystemProcedures(EngineSlot& slot, unsigned int contractIndex)
 {
     wasm_function_inst_t maskFunction = wasm_runtime_lookup_function(slot.instance, "reg_sysproc_mask");

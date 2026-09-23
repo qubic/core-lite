@@ -158,10 +158,10 @@ static long long burn(const void* context, long long amount, unsigned int contra
 }
 
 // CC_WARP shifts only what the contract observes; the node still commits the real tick and epoch, so a
-// warping contract cannot move consensus. Reset per dispatch, and constant-folded away off testnet.
+// warping contract cannot move consensus. a root dispatch's whole call tree shares it, and that tree runs on one thread.
 #if defined(TESTNET)
-static unsigned int cheatTickOffset = 0;
-static unsigned short cheatEpochOffset = 0;
+static thread_local unsigned int cheatTickOffset = 0;
+static thread_local unsigned short cheatEpochOffset = 0;
 #else
 static constexpr unsigned int cheatTickOffset = 0;
 static constexpr unsigned short cheatEpochOffset = 0;
@@ -410,6 +410,22 @@ struct CheatContextImage
 };
 static_assert(sizeof(CheatContextImage) == sizeof(QPI::QpiContext), "CheatContextImage out of sync with QPI::QpiContext");
 
+// the context is copied into module memory byte for byte, and a wasm32 module reads it at these offsets.
+struct QpiContextLayoutProbe : QPI::QpiContext
+{
+    static void check()
+    {
+        static_assert(alignof(m256i) == 8, "a module lays m256i out at 8-byte alignment");
+        static_assert(offsetof(QpiContextLayoutProbe, _currentContractIndex) == 0, "QpiContext::_currentContractIndex moved");
+        static_assert(offsetof(QpiContextLayoutProbe, _stackIndex) == 4, "QpiContext::_stackIndex moved");
+        static_assert(offsetof(QpiContextLayoutProbe, _currentContractId) == 8, "QpiContext::_currentContractId moved");
+        static_assert(offsetof(QpiContextLayoutProbe, _originator) == 40, "QpiContext::_originator moved");
+        static_assert(offsetof(QpiContextLayoutProbe, _invocator) == 72, "QpiContext::_invocator moved");
+        static_assert(offsetof(QpiContextLayoutProbe, _invocationReward) == 104, "QpiContext::_invocationReward moved");
+        static_assert(offsetof(QpiContextLayoutProbe, _entryPoint) == 112, "QpiContext::_entryPoint moved");
+    }
+};
+
 static void clearCheatWarp()
 {
 #if defined(TESTNET)
@@ -447,34 +463,29 @@ static long long dealCheatBalance(const m256i& publicKey, long long amount)
 
 #endif
 
-// Rewrites the guest's copy of the context. The host's own QpiContext is untouched, so the node still
-// bills and attributes the real caller; only what the contract reads changes. Lives here rather than in
-// the vtable because the guest address comes from the adapter, and the vtable signature must mirror the
-// guest's exactly.
-static long long prankCheatCaller(const void* context, void* guestContext, const m256i* caller, long long invocationReward)
+// callees and callbacks build their context from the host's, so the caller is rewritten there as well. the
+// reward changes only in the guest copy: a callee function copies the host's, and money is never pranked.
+static long long prankCheatCaller(const void* context, const CheatContextImage* realContext, void* guestContext, const m256i* caller,
+    long long invocationReward)
 {
 #if defined(TESTNET)
-    const CheatContextImage* hostImage = (const CheatContextImage*)context;
-
-    if (!hostImage || hostImage->entryPoint == (unsigned char)DispatchKind::UserFunction)
+    if (!context || !guestContext)
     {
         return CHEAT_ERR_WRONG_CONTEXT;
     }
 
-    if (!guestContext)
-    {
-        return CHEAT_ERR_WRONG_CONTEXT;
-    }
-
+    CheatContextImage* hostImage = (CheatContextImage*)context;
     CheatContextImage* image = (CheatContextImage*)guestContext;
 
-    // Unprank restores what the host handed the guest at dispatch, which is the host's own context.
-    image->originator = caller ? *caller : hostImage->originator;
-    image->invocator = caller ? *caller : hostImage->invocator;
-    image->invocationReward = caller ? invocationReward : hostImage->invocationReward;
+    hostImage->originator = caller ? *caller : realContext->originator;
+    hostImage->invocator = caller ? *caller : realContext->invocator;
+    image->originator = hostImage->originator;
+    image->invocator = hostImage->invocator;
+    image->invocationReward = caller ? invocationReward : realContext->invocationReward;
     return image->invocationReward;
 #else
     (void)context;
+    (void)realContext;
     (void)guestContext;
     (void)caller;
     (void)invocationReward;
@@ -488,10 +499,8 @@ static long long prankCheatCaller(const void* context, void* guestContext, const
 static long long cheat(const void* context, unsigned int op, unsigned long long a, unsigned long long b, void* ptr, unsigned int len)
 {
 #if defined(TESTNET)
-    const CheatContextImage* image = (const CheatContextImage*)context;
-
-    // Every opcode below mutates something a read-only call must not touch.
-    if (!image || image->entryPoint == (unsigned char)DispatchKind::UserFunction)
+    // function frames are refused by the adapter, which knows the frame kind: a nested function inherits its caller's entry point.
+    if (!context)
     {
         return CHEAT_ERR_WRONG_CONTEXT;
     }

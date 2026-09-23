@@ -68,6 +68,8 @@ struct EngineSlot
     ffi_closure* migrationClosure = nullptr;
     unsigned char* pendingOldState = nullptr;
     uint32_t pendingOldStateSize = 0;
+    // the last load started from a staged state, so the slot counts as constructed and INITIALIZE must not run over it
+    bool stateSeeded = false;
     // Zero when the artifact carries no journal, which leaves the page tracker as the only diff source.
     uint32_t journalBaseOffset = 0;
     JournalHeader journalHeader = {};

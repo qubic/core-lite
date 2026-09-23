@@ -79,7 +79,18 @@ static CallContext createCallContext(const void* context, uint32_t arenaStart, u
     callContext.arenaStart = arenaStart;
     callContext.arenaTop = arenaStart;
     callContext.arenaLimit = arenaLimit;
-    clearCheatWarp();
+
+    if (context)
+    {
+        copyMem(&callContext.realContext, context, sizeof(callContext.realContext));
+    }
+
+    // a warp lasts for one root dispatch, so nested frames see their caller's; the depth is bumped after this.
+    if (dispatchDepth == 0)
+    {
+        clearCheatWarp();
+    }
+
     return callContext;
 }
 
