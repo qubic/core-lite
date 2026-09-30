@@ -15,6 +15,64 @@ void logToConsole(const CHAR16* message);
 namespace Wasm::Runtime
 {
 
+static unsigned int tick(const void* context);
+static inline bool isContractLoaded(unsigned int contractIndex);
+
+// a native callee leaves no dispatch of its own, so its frame is recorded here; a wasm callee records its own on dispatch
+struct NativeCalleeTrace
+{
+    bool enabled = false;
+    TraceEntry entry;
+    std::chrono::steady_clock::time_point startedAt;
+};
+
+static void beginNativeCalleeTrace(NativeCalleeTrace& trace, const void* callerContext, unsigned int contractIndex, unsigned short inputType, DispatchKind kind,
+    const void* input, unsigned int inputSize)
+{
+    trace.enabled = traceEnabled() && !isContractLoaded(contractIndex);
+    if (!trace.enabled)
+    {
+        return;
+    }
+
+    trace.entry.tick = tick(callerContext);
+    trace.entry.contractIndex = contractIndex;
+    trace.entry.inputType = inputType;
+    trace.entry.kind = (unsigned char)kind;
+    trace.entry.inputSize = inputSize;
+    if (inputSize && input)
+    {
+        const auto* bytes = static_cast<const unsigned char*>(input);
+        trace.entry.input.assign(bytes, bytes + inputSize);
+    }
+    if (kind == DispatchKind::UserProcedure)
+    {
+        auto* procedureContext = (const QPI::QpiContextProcedureCall*)callerContext;
+        trace.entry.invocator = procedureContext->invocator();
+    }
+    trace.startedAt = std::chrono::steady_clock::now();
+    pushTraceFrame(trace.entry);
+}
+
+static void finishNativeCalleeTrace(NativeCalleeTrace& trace, const void* output, unsigned int outputSize, long long invocationReward)
+{
+    if (!trace.enabled)
+    {
+        return;
+    }
+
+    trace.entry.invocationReward = invocationReward;
+    trace.entry.outputSize = outputSize;
+    if (outputSize && output)
+    {
+        const auto* bytes = static_cast<const unsigned char*>(output);
+        trace.entry.output.assign(bytes, bytes + outputSize);
+    }
+    trace.entry.executionNanoseconds = (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - trace.startedAt).count();
+    popTraceFrame();
+    commitTrace(trace.entry);
+}
+
 static void logBytes(unsigned int contractIndex, unsigned char type, const void* message, unsigned int size)
 {
     *((unsigned int*)(void*)message) = contractIndex;
@@ -23,8 +81,8 @@ static void logBytes(unsigned int contractIndex, unsigned char type, const void*
     *((unsigned int*)(void*)message) = 0;
 }
 
-static int callContractFunction(const void* callerContext, unsigned int contractIndex, unsigned short inputType, const void* input, unsigned int, void* output,
-    unsigned int)
+static int callContractFunction(const void* callerContext, unsigned int contractIndex, unsigned short inputType, const void* input, unsigned int inputSize,
+    void* output, unsigned int outputSize)
 {
     if (contractIndex >= contractCount || !contractUserFunctions[contractIndex][inputType])
     {
@@ -42,7 +100,10 @@ static int callContractFunction(const void* callerContext, unsigned int contract
     void* state = caller->__qpiAcquireStateForReading(contractIndex);
     void* locals = caller->__qpiAllocLocals(contractUserFunctionLocalsSizes[contractIndex][inputType]);
 
+    NativeCalleeTrace trace;
+    beginNativeCalleeTrace(trace, callerContext, contractIndex, inputType, DispatchKind::UserFunction, input, inputSize);
     contractUserFunctions[contractIndex][inputType](*calleeContext, state, (void*)input, output, locals);
+    finishNativeCalleeTrace(trace, output, outputSize, 0);
 
     caller->__qpiFreeLocals();
     caller->__qpiReleaseStateForReading(contractIndex);
@@ -50,8 +111,8 @@ static int callContractFunction(const void* callerContext, unsigned int contract
     return (int)QPI::NoCallError;
 }
 
-static int invokeContractProcedure(const void* callerContext, unsigned int contractIndex, unsigned short inputType, const void* input, unsigned int,
-    void* output, unsigned int, long long invocationReward)
+static int invokeContractProcedure(const void* callerContext, unsigned int contractIndex, unsigned short inputType, const void* input, unsigned int inputSize,
+    void* output, unsigned int outputSize, long long invocationReward)
 {
     if (contractIndex >= contractCount || !contractUserProcedures[contractIndex][inputType])
     {
@@ -69,7 +130,10 @@ static int invokeContractProcedure(const void* callerContext, unsigned int contr
     void* state = caller->__qpiAcquireStateForWriting(contractIndex);
     void* locals = caller->__qpiAllocLocals(contractUserProcedureLocalsSizes[contractIndex][inputType]);
 
+    NativeCalleeTrace trace;
+    beginNativeCalleeTrace(trace, callerContext, contractIndex, inputType, DispatchKind::UserProcedure, input, inputSize);
     contractUserProcedures[contractIndex][inputType](*calleeContext, state, (void*)input, output, locals);
+    finishNativeCalleeTrace(trace, output, outputSize, invocationReward);
 
     caller->__qpiFreeLocals();
     caller->__qpiReleaseStateForWriting(contractIndex);

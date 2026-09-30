@@ -9,7 +9,7 @@
 namespace AntWalkProto
 {
 static constexpr unsigned int MAGIC = 0x57544E41u;   // "ANTW"
-static constexpr unsigned int VERSION = 1;
+static constexpr unsigned int VERSION = 2;
 
 static constexpr unsigned int ANN_BYTES = (unsigned int)sizeof(score_engine::ScoreBpp9000T::ANN);
 
@@ -25,7 +25,7 @@ constexpr unsigned int mixConfig(unsigned int accumulated, unsigned long long va
 }
 
 constexpr unsigned int CONFIG_HASH =
-    mixConfig(mixConfig(mixConfig(mixConfig(mixConfig(mixConfig(mixConfig(mixConfig(mixConfig(mixConfig(
+    mixConfig(mixConfig(mixConfig(mixConfig(mixConfig(mixConfig(mixConfig(mixConfig(mixConfig(mixConfig(mixConfig(
         2166136261u,
         BPP9000_NUMBER_OF_INPUT_NEURONS),
         BPP9000_NUMBER_OF_OUTPUT_NEURONS),
@@ -36,6 +36,7 @@ constexpr unsigned int CONFIG_HASH =
         BPP9000_POPULATION_THRESHOLD),
         BPP9000_NUMBER_OF_MUTATIONS),
         BPP9000_SOLUTION_THRESHOLD_DEFAULT),
+        BPP9000_SHIFT_CAP),
         (unsigned long long)ANN_BYTES);
 
 enum MessageType : unsigned int
@@ -51,7 +52,7 @@ enum MessageType : unsigned int
 enum ResultStatus : unsigned int
 {
     ResultOk = 0,
-    ResultUnscorable = 1,   // the engine returned INVALID_SCORE_VALUE, childAnn is not written
+    ResultUnscorable = 1,   // the engine returned an invalid rating, childAnn is not written
     ResultStaleEpoch = 2,   // the job named an epoch the walker is no longer seeded for
 };
 
@@ -99,7 +100,9 @@ struct JobPayload
 {
     unsigned long long jobId;
     unsigned int epochId;
-    unsigned int isRoot;             // parentAnn is unused when set; the walker derives the epoch root
+    unsigned int isRoot;             // parentAnn is unused when set; the walker derives the identity's root
+    unsigned int parentShift;        // frame the parent reached; the walk starts there
+    unsigned int reserved;
     unsigned char pubkey[32];
     unsigned char nonce[32];
     unsigned char anchorDigest[32];
@@ -111,15 +114,15 @@ struct ResultPayload
     unsigned long long jobId;
     unsigned int epochId;
     unsigned int status;
-    unsigned int score;
-    unsigned int reserved;
+    unsigned int score;              // error count inside the frame
+    unsigned int shift;              // frame the walk reached
     unsigned char childAnn[ANN_BYTES];
 };
 
 static_assert(sizeof(FrameHeader) == 16, "FrameHeader must stay 16 bytes on the wire");
 static_assert(sizeof(HelloPayload) == 112, "HelloPayload layout changed - bump VERSION");
 static_assert(sizeof(ReadyPayload) == 24, "ReadyPayload layout changed - bump VERSION");
-static_assert(sizeof(JobPayload) == 16 + 96 + ANN_BYTES, "JobPayload layout changed - bump VERSION");
+static_assert(sizeof(JobPayload) == 24 + 96 + ANN_BYTES, "JobPayload layout changed - bump VERSION");
 static_assert(sizeof(ResultPayload) == 24 + ANN_BYTES, "ResultPayload layout changed - bump VERSION");
 
 // The largest frame either side ever reads, so both can size one static buffer.

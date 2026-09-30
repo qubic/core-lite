@@ -210,13 +210,18 @@ inline bool broadcastAntSolution(ColonyT& colony,
     // Extend this identity's best node when it has one, otherwise start its tree from the root.
     SolutionRef parentRef = ROOT_REF;
     const AntSolutionRecord* parentRec = nullptr;
-    unsigned int parentScore = 0xFFFFFFFFU;
+    score_engine::Rating parentRating = score_engine::Rating::worst();
     for (unsigned int i = 0; i < colony.solutionCount(); i++)
     {
         const AntSolutionRecord* rec = colony.recordAt((long long)i);
-        if (rec != nullptr && rec->pubkey == minerKey && rec->score < parentScore)
+        if (rec == nullptr || !(rec->pubkey == minerKey))
         {
-            parentScore = rec->score;
+            continue;
+        }
+        const score_engine::Rating recRating{ rec->score, rec->shift };
+        if (recRating.isBetterThan(parentRating))
+        {
+            parentRating = recRating;
             parentRef = rec->selfRef;
             parentRec = rec;
         }
@@ -307,37 +312,45 @@ inline bool broadcastAntSolution(ColonyT& colony,
         return true;
     }
 
-    unsigned int childScore = score_engine::INVALID_SCORE_VALUE;
+    // A root parent sits at frame 0.
+    const unsigned int parentShift = (parentRec != nullptr) ? parentRec->shift : 0u;
+    score_engine::Rating childRating = score_engine::Rating::worst();
     bool found = false;
     for (unsigned int attempt = 0; attempt < attempts && !found; attempt++)
     {
         nonce.setRandomValue();
         nonce.m256i_u8[0] = (unsigned char)score_engine::AlgoType::Bpp9000;
-        nonce.m256i_u8[1] = (unsigned char)(1 + (nonce.m256i_u8[1] % score_engine::MAX_LUT_ENTRIES_PER_STEP));
+        const unsigned char changesPerStep = (unsigned char)(1 + (nonce.m256i_u8[1] % score_engine::BPP9000_MAX_CHANGES_PER_STEP));
+        const unsigned char mutationMode = (unsigned char)(score_engine::BPP9000_MODE_START + (nonce.m256i_u8[3] % 3));
+        nonce.m256i_u8[1] = (unsigned char)(changesPerStep | (mutationMode << 4));
         nonce.m256i_u8[2] = 0;   // no explore steps: pure descent gives the best odds of beating the parent
 
         const unsigned long long walkStart = __rdtsc();
-        childScore = scoreFn.computeAntChildScore(processorNumber, parentAnnPtr, minerKey, nonce,
-                                                  anchorDigest, childAnn);
+        childRating = scoreFn.computeAntChildScore(processorNumber, parentAnnPtr, parentShift, minerKey, nonce,
+                                                   anchorDigest, childAnn);
         {
-            CHAR16 line[192];
+            CHAR16 line[224];
             setText(line, L"ANT-INJECT attempt score=");
-            appendNumber(line, childScore, FALSE);
+            appendNumber(line, childRating.error, FALSE);
+            appendText(line, L" shift=");
+            appendNumber(line, childRating.shift, FALSE);
             appendText(line, L" parentScore=");
-            appendNumber(line, parentScore, FALSE);
+            appendNumber(line, parentRating.error, FALSE);
+            appendText(line, L" parentShift=");
+            appendNumber(line, parentShift, FALSE);
             appendText(line, L" threshold=");
             appendNumber(line, colony.errorThreshold(), FALSE);
             appendText(line, L" ms=");
             appendNumber(line, (__rdtsc() - walkStart) / (frequency / 1000), FALSE);
             logToConsole(line);
         }
-        if (childScore == score_engine::INVALID_SCORE_VALUE)
+        if (!childRating.isValid())
         {
             continue;
         }
 
-        const bool beatsParent = (childScore < parentScore);
-        const bool clearsThreshold = (childScore <= colony.errorThreshold());
+        const bool beatsParent = childRating.isBetterThan(parentRating);
+        const bool clearsThreshold = childRating.clearsFloor(colony.errorThreshold());
         // Every walk beats the root's WORST_SCORE, so LeParent is unreachable until the identity has a real parent: seed one first.
         found = (mode == AntInjectMode::LeParent && parentRec != nullptr)
             ? (clearsThreshold && !beatsParent)
@@ -352,14 +365,16 @@ inline bool broadcastAntSolution(ColonyT& colony,
     // BadClaim keeps the honest nonce so the node's recompute succeeds and then disagrees, which is
     // what forfeits the deposit.
     const unsigned int claimedScore =
-        (mode == AntInjectMode::BadClaim) ? (childScore + 1) : childScore;
+        (mode == AntInjectMode::BadClaim) ? (childRating.error + 1) : childRating.error;
 
     const unsigned int publishTick = system.tick + ANT_INJECT_PUBLICATION_OFFSET;
     detail::signAndBroadcastAntSolution(computorIdx, parentRef, usedAnchorTick, claimedScore, nonce, publishTick);
 
     CHAR16 line[192];
     setText(line, L"ANT-INJECT published score=");
-    appendNumber(line, childScore, FALSE);
+    appendNumber(line, childRating.error, FALSE);
+    appendText(line, L" shift=");
+    appendNumber(line, childRating.shift, FALSE);
     appendText(line, L" claimed=");
     appendNumber(line, claimedScore, FALSE);
     appendText(line, L" parent=");

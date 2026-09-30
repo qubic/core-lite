@@ -85,6 +85,8 @@ struct TraceEntry
     std::vector<HostCallTrace> hostCalls;
     std::vector<LogTrace> logs;
     std::vector<CheatEntry> cheats;
+    // sequences of the frames this dispatch called directly, in completion order
+    std::vector<unsigned long long> children;
 };
 
 // On by default so a debugger attached after the fact still finds the calls that mattered. This header
@@ -155,14 +157,37 @@ static inline void recordHostCall(TraceEntry* entry, const char* name, const std
     }
 }
 
+// the frames of the call in progress on this thread, innermost last; each is an uncommitted entry the thread owns
+static thread_local std::vector<TraceEntry*> traceFrameStack;
+
+static inline void pushTraceFrame(TraceEntry& entry)
+{
+    traceFrameStack.push_back(&entry);
+}
+
+static inline void popTraceFrame()
+{
+    if (!traceFrameStack.empty())
+    {
+        traceFrameStack.pop_back();
+    }
+}
+
 static inline void commitTrace(TraceEntry& entry)
 {
-    TraceLockScope lock;
+    {
+        TraceLockScope lock;
 
-    entry.sequence = ++traceSequence;
-    entry.used = true;
-    traceRing[traceWriteIndex % WASM_TRACE_RING_CAPACITY] = entry;
-    traceWriteIndex++;
+        entry.sequence = ++traceSequence;
+        entry.used = true;
+        traceRing[traceWriteIndex % WASM_TRACE_RING_CAPACITY] = entry;
+        traceWriteIndex++;
+    }
+    // the frame still open on this thread made the call, and no other thread reads it before it commits
+    if (!traceFrameStack.empty())
+    {
+        traceFrameStack.back()->children.push_back(entry.sequence);
+    }
 }
 
 static inline std::vector<TraceEntry> traceSnapshot(unsigned long long since, unsigned int limit)

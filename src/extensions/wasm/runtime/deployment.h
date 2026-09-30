@@ -102,7 +102,7 @@ static void recordDeployOutcome(unsigned long long sessionId, unsigned int slot,
     const int slotOffset = reservedSlotOffset(targetSlot);
     if (slotOffset < 0)
     {
-        refuse(DEPLOY_CODE_BAD_SLOT, "slot " + std::to_string(targetSlot) + " is not a dynamic contract slot");
+        refuse(DEPLOY_CODE_BAD_SLOT, "slot " + std::to_string(targetSlot) + " is not a deployable smart contract slot");
         return;
     }
 

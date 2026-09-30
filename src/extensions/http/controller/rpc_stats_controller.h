@@ -90,17 +90,6 @@ RPC_ROUTE("GET", "/v1/tick-bench")
     result["currentTick"] = system.tick;
     result["phases"] = phases;
 
-    const LiteParallelScore::Stats ps = LiteParallelScore::stats();
-    Json::Value parallelScore;
-    parallelScore["threads"] = ps.threads;
-    parallelScore["walksTickPath"] = Json::UInt64(ps.walksTickPath);
-    parallelScore["walksPrecompute"] = Json::UInt64(ps.walksPrecompute);
-    parallelScore["walksSerial"] = Json::UInt64(ps.walksSerial);
-    parallelScore["stepsParallel"] = Json::UInt64(ps.stepsParallel);
-    parallelScore["walksPriorityWait"] = Json::UInt64(ps.walksPriorityWait);
-    parallelScore["stepsSerialFallback"] = Json::UInt64(ps.stepsSerialFallback);
-    result["parallelScore"] = parallelScore;
-
     if (req.getParameter("reset") == "1" || req.getParameter("reset") == "true")
         TickBench::reset();
 

@@ -123,7 +123,11 @@ RPC_ROUTE("GET", "/explorer/data")
         CHAR16 id[61] = {};
         getIdentity((unsigned char*)&minerPublicKeys[i], id, false);
         m["publicKey"] = wchar_to_string(id);
-        m["score"]     = minerScores[i];
+        // The ranking key holds the reach in its high half, inverted so that further sorts first.
+        const unsigned int rankingKey = minerScores[i];
+        const bool hasSolution = (rankingKey != NO_MINER_SCORE);
+        m["score"]     = hasSolution ? (rankingKey & 0xFFFFU) : rankingKey;
+        m["shift"]     = hasSolution ? (0xFFFFU - (rankingKey >> 16)) : 0U;
         topMiners.append(m);
     }
     RELEASE(minerScoreArrayLock);

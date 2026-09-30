@@ -310,7 +310,7 @@ static int cmdReadScoreCache(int argc, char** argv)
         const unsigned int score = (unsigned int)e.score;
         const bool valid = isBpp9000
             && score != std::numeric_limits<unsigned int>::max()
-            && score <= BPP9000_NUMBER_OF_WINDOWS;
+            && score <= BPP9000_WINDOW_WIDTH;
         const bool good = valid && score <= BPP9000_SOLUTION_THRESHOLD_DEFAULT;
         const char* scoreStatus = good ? "(good)" : valid ? "(above threshold)" : "(invalid)";
 

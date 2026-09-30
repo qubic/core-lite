@@ -398,9 +398,6 @@ target_link_libraries(qubic-cli PRIVATE m)
 if(ANT_WALKER)
     target_compile_definitions(Qubic PRIVATE ANT_WALKER)
 endif()
-if(LITE_PARALLEL_SCORE)
-    target_compile_definitions(Qubic PRIVATE LITE_PARALLEL_SCORE)
-endif()
 
 # Configure linker settings based on compiler
 if(IS_MSVC)

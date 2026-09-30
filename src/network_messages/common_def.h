@@ -7,12 +7,7 @@
 #define NUMBER_OF_TRANSACTIONS_PER_TICK 4096ULL // Must be 2^N
 #endif
 #define MAX_NUMBER_OF_CONTRACTS 1024 // Must be 1024
-// Use a small committee for local dynamic-contract development.
-#if defined(TESTNET) && defined(LITE_WASM_SC)
-#define NUMBER_OF_COMPUTORS 8
-#else
 #define NUMBER_OF_COMPUTORS 676
-#endif
 #define QUORUM (NUMBER_OF_COMPUTORS * 2 / 3 + 1)
 #define NUMBER_OF_EXCHANGED_PEERS 4
 

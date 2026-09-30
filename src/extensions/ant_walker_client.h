@@ -411,20 +411,21 @@ inline bool dispatchOne()
     // Every other scoring path memoises its walk, so a score already held here costs no job at all.
     const AntColonyBpp9000T::ReplayKey replayKey = makeAntReplayKey(record->pubkey, record->nonce, record->parentRef, anchorDigest);
     AntColonyBpp9000T::Ann memoAnn;
-    unsigned int memoScore;
-    if (gAntColony.tryGetReplayScore(replayKey, memoScore, memoAnn))
+    score_engine::Rating memo = score_engine::Rating::worst();
+    if (gAntColony.tryGetReplayScore(replayKey, memo, memoAnn))
     {
-        if (memoScore != record->score)
+        // The stored shift is a lower bound, so only a walk that lands below it disagrees.
+        if (memo.error != record->score || memo.shift < record->shift)
         {
             // The node's own cache disagreeing is the record's fault, not the walker's, so no streak.
             gAntColony.releaseAnnClaim(index);
             markFailed(index);
-            logLine("record %u memo %u != accepted %u, marked failed", index, memoScore, record->score);
+            logLine("record %u memo %u shift %u != accepted %u shift %u, marked failed", index, memo.error, memo.shift, record->score, record->shift);
             return false;
         }
         unsigned int memoHash;
         KangarooTwelve(&memoAnn, sizeof(memoAnn), &memoHash, sizeof(memoHash));
-        gAntColony.publishAnn(index, memoAnn, memoHash);
+        AntColonyMaintenance::publishRebuilt(gAntColony, index, memoAnn, memoHash, memo);
         gState.memoHits.fetch_add(1, std::memory_order_relaxed);
         gState.materialised.fetch_add(1, std::memory_order_relaxed);
         if (gState.debug)
@@ -445,6 +446,8 @@ inline bool dispatchOne()
             return false;
         }
         copyMem(job.parentAnn, &parentAnn, sizeof(parentAnn));
+        // Read after the network: a parent that has one holds its walked shift, not a guess.
+        job.parentShift = parentRecord->shift;
     }
 
     const int fd = gState.fd.load(std::memory_order_acquire);
@@ -540,10 +543,11 @@ inline void applyResult(const AntWalkProto::ResultPayload& result)
         return;
     }
 
-    if (result.status != AntWalkProto::ResultOk || result.score != record->score)
+    if (result.status != AntWalkProto::ResultOk || result.score != record->score || result.shift < record->shift)
     {
         gAntColony.releaseAnnClaim(job.recordIndex);
-        logLine("record %u walked %u != accepted %u, marked failed", job.recordIndex, result.score, record->score);
+        logLine("record %u walked %u shift %u != accepted %u shift %u, marked failed", job.recordIndex, result.score, result.shift, record->score,
+            record->shift);
         noteDisagreement(job.recordIndex);
         return;
     }
@@ -553,15 +557,16 @@ inline void applyResult(const AntWalkProto::ResultPayload& result)
     unsigned int annHash;
     KangarooTwelve(&childAnn, sizeof(childAnn), &annHash, sizeof(annHash));
 
-    gAntColony.publishAnn(job.recordIndex, childAnn, annHash);
+    const score_engine::Rating walked{ result.score, result.shift };
+    AntColonyMaintenance::publishRebuilt(gAntColony, job.recordIndex, childAnn, annHash, walked);
     // The cache every scoring path consults, so a strict replay of this solution is a lookup.
     const AntColonyBpp9000T::ReplayKey replayKey = makeAntReplayKey(record->pubkey, record->nonce, record->parentRef, job.anchorDigest);
-    gAntColony.putReplayScore(replayKey, result.score, childAnn);
+    gAntColony.putReplayScore(replayKey, walked, childAnn);
     gState.materialised.fetch_add(1, std::memory_order_relaxed);
     noteSuccess();
     if (gState.debug)
     {
-        logLine("job %llu record %u score %u in %lld ms", (unsigned long long)result.jobId, job.recordIndex, result.score, walkMs);
+        logLine("job %llu record %u score %u shift %u in %lld ms", (unsigned long long)result.jobId, job.recordIndex, result.score, result.shift, walkMs);
     }
 }
 

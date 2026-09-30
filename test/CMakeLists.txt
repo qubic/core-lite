@@ -61,7 +61,7 @@ add_executable(
 		contract_qrwa.cpp
 		contract_qip.cpp
 		contract_qusino.cpp
-		ant_colony.cpp
+		lite_ant_colony.cpp
 		ant_pending_solutions.cpp
 		trit_pack.cpp
 		custom_qubic_mining_storage.cpp
@@ -136,9 +136,6 @@ foreach(TEST_TARGET IN ITEMS qubic_core_tests qubic_state_tests)
             -mrdrnd -Wno-error -mbmi -mlzcnt -fshort-wchar -w)
     endif()
 endforeach()
-if(LITE_PARALLEL_SCORE)
-    target_compile_definitions(qubic_core_tests PRIVATE LITE_PARALLEL_SCORE)
-endif()
 
 target_link_libraries(
   qubic_core_tests PRIVATE

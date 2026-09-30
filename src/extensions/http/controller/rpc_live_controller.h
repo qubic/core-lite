@@ -770,6 +770,13 @@ RPC_ROUTE("GET", "/live/v1/debug-trace")
         }
         entry["hostCalls"] = hostCalls;
 
+        Json::Value children(Json::arrayValue);
+        for (const auto sequence : trace.children)
+        {
+            children.append((Json::UInt64)sequence);
+        }
+        entry["children"] = children;
+
         Json::Value logs(Json::arrayValue);
         for (const auto& log : trace.logs)
         {

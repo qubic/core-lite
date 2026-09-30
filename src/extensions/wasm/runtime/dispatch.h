@@ -276,6 +276,7 @@ static void beginDispatchTrace(const EngineSlot& slot, uint32_t contractIndex, u
     callContext.trace = &trace.entry;
     trace.state = (unsigned char*)wasm_runtime_addr_app_to_native(slot.instance, slot.stateOffset);
     trace.startedAt = std::chrono::steady_clock::now();
+    pushTraceFrame(trace.entry);
 }
 
 static void finishDispatchTrace(const EngineSlot& slot, const MemoryLayout& layout, const IoSizes& sizes, CallContext& callContext, DispatchTrace& trace)
@@ -304,6 +305,7 @@ static void finishDispatchTrace(const EngineSlot& slot, const MemoryLayout& layo
     trace.entry.stateVersion = writeSeq + (writeSeq & 1ull);
 
     callContext.trace = nullptr;
+    popTraceFrame();
     commitTrace(trace.entry);
 }
 

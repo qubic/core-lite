@@ -136,12 +136,10 @@ bool ensurePool(const unsigned char* miningSeed)
 
 bool loadEmbeddedTask(score_engine::ScoreBpp9000T& engine)
 {
-    const unsigned int inputTrits = (unsigned int)BPP9000_NUMBER_OF_INPUT_NEURONS;
-    const unsigned int outputTrits = (unsigned int)BPP9000_NUMBER_OF_OUTPUT_NEURONS;
-    const unsigned int population = (unsigned int)BPP9000_POPULATION_THRESHOLD;
-    const unsigned int neighbors = (unsigned int)BPP9000_NUMBER_OF_NEIGHBORS;
-
-    const unsigned long long topologyBytes = score_task_file::topologyBytes(inputTrits, outputTrits, population, neighbors);
+    // Sized by the file's own header: its population need not match the configured one.
+    const score_task_file::TaskFileHeader* header = (const score_task_file::TaskFileHeader*)BPP9000_TASK_BYTES;
+    const unsigned long long topologyBytes =
+        score_task_file::topologyBytes(header->numInputTrits, header->numOutputTrits, header->population, header->numNeighbors);
     const unsigned char* topologyBlock = BPP9000_TASK_BYTES + sizeof(score_task_file::TaskFileHeader);
     const unsigned char* dataBlock = topologyBlock + topologyBytes;
 
@@ -215,10 +213,13 @@ void runWorker(unsigned int workerIndex)
         }
         else
         {
+            // Per job: the control and output neurons live in the engine and follow the pool seed.
+            engine->deriveControlOutput(gPoolSeed, gPool);
+
             const Ann* parentAnn;
             if (job.isRoot)
             {
-                engine->deriveRootANN(gPoolSeed, gPool, rootAnn);
+                engine->deriveRootANN(job.pubkey, gPool, rootAnn);
                 parentAnn = &rootAnn;
             }
             else
@@ -226,8 +227,9 @@ void runWorker(unsigned int workerIndex)
                 parentAnn = (const Ann*)job.parentAnn;
             }
 
-            const unsigned int score = engine->computeScoreFromParent(*parentAnn, job.pubkey, job.nonce, job.anchorDigest, gPool);
-            if (score == score_engine::INVALID_SCORE_VALUE)
+            const score_engine::Rating rating =
+                engine->computeScoreFromParent(*parentAnn, job.parentShift, job.pubkey, job.nonce, job.anchorDigest, gPool);
+            if (!rating.isValid())
             {
                 result.status = AntWalkProto::ResultUnscorable;
             }
@@ -235,7 +237,8 @@ void runWorker(unsigned int workerIndex)
             {
                 engine->getBestANN(childAnn);
                 result.status = AntWalkProto::ResultOk;
-                result.score = score;
+                result.score = rating.error;
+                result.shift = rating.shift;
                 memcpy(result.childAnn, &childAnn, sizeof(childAnn));
             }
         }

@@ -25,12 +25,7 @@ namespace QPI
 
 	constexpr sint64 INVALID_AMOUNT = 0x8000000000000000;
 
-// Use a small committee for local dynamic-contract development.
-#if defined(TESTNET) && defined(LITE_WASM_SC)
-#define NUMBER_OF_COMPUTORS 8
-#else
 #define NUMBER_OF_COMPUTORS 676
-#endif
 #define QUORUM (NUMBER_OF_COMPUTORS * 2 / 3 + 1)
 
 	//////////

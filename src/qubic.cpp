@@ -86,8 +86,6 @@
 #define system qsystem
 #endif
 
-// #define NO_QTREAT
-
 // #define INCLUDE_CONTRACT_TEST_EXAMPLES
 
 
@@ -347,7 +345,6 @@ static PendingTxsPool pendingTxsPool;
 #include "extensions/tx_slot_index.h"
 #include "extensions/tick_bench.h"
 #include "extensions/tx_stats.h"
-#include "extensions/parallel_score.h"
 
 static m256i uniqueNextTickTransactionDigests[NUMBER_OF_COMPUTORS];
 static m256i uniqueCurrentSpectrumDigests[NUMBER_OF_COMPUTORS];
@@ -530,8 +527,10 @@ static void antDebugPending(const CHAR16* outcome, const AntPendingSolution& ent
     appendNumber(msg, entry.parentRef.solutionIndexInTick, FALSE);
     appendText(msg, L" anchor=");
     appendNumber(msg, entry.anchorTick, FALSE);
+    appendText(msg, L" shift=");
+    appendNumber(msg, entry.rating.shift, FALSE);
     appendText(msg, L" score=");
-    appendNumber(msg, entry.score, FALSE);
+    appendNumber(msg, entry.rating.error, FALSE);
     appendText(msg, L" target=");
     appendNumber(msg, targetTick, FALSE);
     logToConsole(msg);
@@ -567,7 +566,7 @@ static void antDebugAccepted(const AntColonyMiningSolutionTransaction* transacti
 // Pre-scored ant solutions for the current tick, indexed by TRANSACTION index. Each transaction is
 // enqueued at most once, so no two workers ever write the same slot and no lock is needed
 static bool gAntScoredReady[NUMBER_OF_TRANSACTIONS_PER_TICK];
-static unsigned int gAntScoredValue[NUMBER_OF_TRANSACTIONS_PER_TICK];
+static score_engine::Rating gAntScoredRating[NUMBER_OF_TRANSACTIONS_PER_TICK];
 static AntColonyBpp9000T::Ann gAntScoredAnn[NUMBER_OF_TRANSACTIONS_PER_TICK];
 
 // Enqueued per ant solution transaction. 80 bytes, inside ScoreFunction::TASK_PAYLOAD_MAX.
@@ -633,14 +632,15 @@ static void scoreAntSolutionTask(unsigned long long processorNumber, void* paylo
         makeAntReplayKey(task->pubkey, task->nonce, task->parentRef, anchorDigest);
 
     // Check in the cache first if this sol was computed
-    if (!gAntColony.tryGetReplayScore(replayKey, gAntScoredValue[task->txIdx], gAntScoredAnn[task->txIdx]))
+    // A root parent sits at frame 0.
+    const unsigned int parentShift = (parentRec != nullptr) ? parentRec->shift : 0u;
+    if (!gAntColony.tryGetReplayScore(replayKey, gAntScoredRating[task->txIdx], gAntScoredAnn[task->txIdx]))
     {
-        LiteParallelScore::Scope parallelScope(LiteParallelScore::TickPath);
         // Straight into this transaction's own result slot, so nothing is copied afterwards.
-        gAntScoredValue[task->txIdx] = score->computeAntChildScore(
-            processorNumber, parentAnn, task->pubkey, task->nonce,
+        gAntScoredRating[task->txIdx] = score->computeAntChildScore(
+            processorNumber, parentAnn, parentShift, task->pubkey, task->nonce,
             anchorDigest, gAntScoredAnn[task->txIdx]);
-        gAntColony.putReplayScore(replayKey, gAntScoredValue[task->txIdx], gAntScoredAnn[task->txIdx]);
+        gAntColony.putReplayScore(replayKey, gAntScoredRating[task->txIdx], gAntScoredAnn[task->txIdx]);
     }
 
     // Last, so the transaction loop never sees a slot whose score or network is half written.
@@ -724,6 +724,12 @@ namespace AntWalker
 inline void preemptClaim(unsigned int index);
 }
 
+namespace AntColonyMaintenance
+{
+inline void publishRebuilt(AntColonyBpp9000T& colony, unsigned int index, const AntColonyBpp9000T::Ann& ann, unsigned int annHash,
+    const score_engine::Rating& rating);
+}
+
 // A background walker job holds its claim for a whole walk, so a rebuild the tick needs would queue
 // behind it. Asking repeatedly is free: the walker only hands back a job old enough to be stuck.
 static constexpr unsigned int ANT_ANN_CLAIM_PREEMPT_POLLS = 250;
@@ -769,6 +775,8 @@ static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned
     }
 
     const AntColonyBpp9000T::Ann* parentAnn = nullptr;
+    // A root parent sits at frame 0.
+    unsigned int parentShift = 0;
     if (!rec->parentRef.isRoot())
     {
         const long long parentIdx = gAntColony.findIndexBySolutionRef(rec->parentRef);
@@ -781,6 +789,8 @@ static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned
             return false;
         }
         parentAnn = &gAntRebuildParentScratch[processorNumber];
+        // Read after the network: a parent that has one holds its walked shift, not a guess.
+        parentShift = parentRec->shift;
     }
 
     m256i anchorDigest;
@@ -793,16 +803,17 @@ static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned
     // The cache every other scoring path consults, so a rebuild never re-walks a score we hold.
     AntColonyBpp9000T::Ann& childAnn = gAntRebuildChildScratch[processorNumber];
     const AntColonyBpp9000T::ReplayKey replayKey = makeAntReplayKey(rec->pubkey, rec->nonce, rec->parentRef, anchorDigest);
-    unsigned int rebuiltScore;
-    if (!gAntColony.tryGetReplayScore(replayKey, rebuiltScore, childAnn))
+    score_engine::Rating rebuilt = score_engine::Rating::worst();
+    if (!gAntColony.tryGetReplayScore(replayKey, rebuilt, childAnn))
     {
-        rebuiltScore = score->computeAntChildScore(processorNumber, parentAnn, rec->pubkey, rec->nonce, anchorDigest, childAnn);
-        gAntColony.putReplayScore(replayKey, rebuiltScore, childAnn);
+        rebuilt = score->computeAntChildScore(processorNumber, parentAnn, parentShift, rec->pubkey, rec->nonce, anchorDigest, childAnn);
+        gAntColony.putReplayScore(replayKey, rebuilt, childAnn);
     }
 
     // This walk is the computation the record was admitted without. A disagreement means the acceptance
     // was wrong, so publish nothing: a network built for a score no other node holds is worse than none.
-    if (rebuiltScore != rec->score)
+    // The stored shift is a lower bound, so only a walk that lands below it disagrees.
+    if (rebuilt.error != rec->score || rebuilt.shift < rec->shift)
     {
         gAntColony.releaseAnnClaim(idx);
         CHAR16 msg[256];
@@ -811,21 +822,25 @@ static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned
         appendText(msg, L" accepted ");
         appendNumber(msg, rec->score, FALSE);
         appendText(msg, L" rebuilt ");
-        appendNumber(msg, rebuiltScore, FALSE);
+        appendNumber(msg, rebuilt.error, FALSE);
+        appendText(msg, L" shift ");
+        appendNumber(msg, rebuilt.shift, FALSE);
         logToConsole(msg);
         return false;
     }
 
     unsigned int annHash;
     KangarooTwelve(&childAnn, sizeof(childAnn), &annHash, sizeof(annHash));
-    gAntColony.publishAnn(idx, childAnn, annHash);
+    AntColonyMaintenance::publishRebuilt(gAntColony, idx, childAnn, annHash, rebuilt);
 
     // A rebuild costs a full walk, so a tick that takes tens of seconds is attributable here.
     CHAR16 okLine[224];
     setText(okLine, L"[ant-colony] rebuilt the network of record ");
     appendNumber(okLine, idx, FALSE);
     appendText(okLine, L" score ");
-    appendNumber(okLine, rebuiltScore, FALSE);
+    appendNumber(okLine, rebuilt.error, FALSE);
+    appendText(okLine, L" shift ");
+    appendNumber(okLine, rebuilt.shift, FALSE);
     appendText(okLine, L" in ");
     appendNumber(okLine, (__rdtsc() - rebuildStart) / (frequency / 1000), FALSE);
     appendText(okLine, L" ms");
@@ -954,17 +969,19 @@ static void queueAntSolution(unsigned long long processorNumber, const m256i& co
     // Building the key is far cheaper than a miss, so the cache is consulted first.
     const AntColonyBpp9000T::ReplayKey replayKey =
         makeAntReplayKey(computorPublicKey, payload.nonce, parentRef, anchorDigest);
-    unsigned int childScore = 0;
-    if (!gAntColony.tryGetReplayScore(replayKey, childScore, gAntChildAnnScratch[processorNumber]))
+    score_engine::Rating childRating = score_engine::Rating::worst();
+    // A root parent sits at frame 0.
+    const unsigned int parentShift = (parentRec != nullptr) ? parentRec->shift : 0u;
+    if (!gAntColony.tryGetReplayScore(replayKey, childRating, gAntChildAnnScratch[processorNumber]))
     {
-        childScore = score->computeAntChildScore(processorNumber, parentAnn, computorPublicKey,
+        childRating = score->computeAntChildScore(processorNumber, parentAnn, parentShift, computorPublicKey,
             payload.nonce, anchorDigest, gAntChildAnnScratch[processorNumber]);
         // Cached whatever the outcome: a timed-out network scores invalid, and the walk is
         // deterministic, so the cached rejection stays right - without the entry the same doomed
         // solution costs a full walk again on every path that sees it.
-        gAntColony.putReplayScore(replayKey, childScore, gAntChildAnnScratch[processorNumber]);
+        gAntColony.putReplayScore(replayKey, childRating, gAntChildAnnScratch[processorNumber]);
     }
-    if (!score->isValidScore(childScore, score_engine::AlgoType::Bpp9000))
+    if (!childRating.isValid())
     {
         antDebugPoolDrop(L"unscorable", payload);
         gAntPendingSolutions.noteDroppedUnscorable();
@@ -972,7 +989,7 @@ static void queueAntSolution(unsigned long long processorNumber, const m256i& co
     }
 
     // The sender's own number, checked where it can still prevent work rather than merely be counted.
-    if (payload.claimedScore != childScore)
+    if (payload.claimedScore != childRating.error)
     {
         antDebugPoolDrop(L"claimMismatch", payload);
         gAntPendingSolutions.noteClaimMismatch();
@@ -982,7 +999,7 @@ static void queueAntSolution(unsigned long long processorNumber, const m256i& co
     // The child count only grows, so passing now is not a promise it will pass at publication - the
     // publisher re-checks. Failing now is final enough to refuse the slot.
     const unsigned int childCount = gAntColony.childCountForQuery(parentRef, computorPublicKey);
-    const ChildCandidate candidate{ computorPublicKey, childScore, payload.anchorTick, system.tick };
+    const ChildCandidate candidate{ computorPublicKey, childRating, payload.anchorTick, system.tick };
     if (AntColonyBpp9000T::validateChild(candidate, parentRec, childCount,
         gAntColony.errorThreshold()) != ValidityResult::Valid)
     {
@@ -991,7 +1008,7 @@ static void queueAntSolution(unsigned long long processorNumber, const m256i& co
         return;
     }
 
-    gAntPendingSolutions.add(computorPublicKey, parentRef, payload.anchorTick, childScore,
+    gAntPendingSolutions.add(computorPublicKey, parentRef, payload.anchorTick, childRating,
         payload.nonce);
 }
 
@@ -1004,6 +1021,7 @@ static void antColonyBeginEpoch()
 #endif
     AntWalker::quiesceBegin();
     gAntPendingSolutions.reset();
+    AntColonyMaintenance::clearRaisedShifts();
     gAntColony.beginEpoch(score->currentRandomSeed, system.initialTick);
     AntWalker::onEpochBegin();
     AntWalker::quiesceEnd();
@@ -1967,16 +1985,17 @@ static void processBroadcastTransaction(Peer* peer, RequestResponseHeader* heade
                         {
                             const AntColonyBpp9000T::ReplayKey preKey = makeAntReplayKey(
                                 antTx->sourcePublicKey, antTx->nonce, preParentRef, preAnchorDigest);
-                            unsigned int preScore = 0;
-                            if (!gAntColony.tryGetReplayScore(preKey, preScore, gAntChildAnnScratch[processorNumber]))
+                            score_engine::Rating preRating = score_engine::Rating::worst();
+                            const unsigned int preParentShift =
+                                (preParentRec != nullptr) ? preParentRec->shift : 0u;
+                            if (!gAntColony.tryGetReplayScore(preKey, preRating, gAntChildAnnScratch[processorNumber]))
                             {
-                                LiteParallelScore::Scope parallelScope(LiteParallelScore::Precompute);
-                                preScore = score->computeAntChildScore(processorNumber, preParentAnn,
-                                    antTx->sourcePublicKey, antTx->nonce, preAnchorDigest,
+                                preRating = score->computeAntChildScore(processorNumber, preParentAnn,
+                                    preParentShift, antTx->sourcePublicKey, antTx->nonce, preAnchorDigest,
                                     gAntChildAnnScratch[processorNumber]);
                                 // cache this score so later can skip the heavy score computation,
                                 // invalid ones included
-                                gAntColony.putReplayScore(preKey, preScore, gAntChildAnnScratch[processorNumber]);
+                                gAntColony.putReplayScore(preKey, preRating, gAntChildAnnScratch[processorNumber]);
                             }
                         }
                     }
@@ -2432,6 +2451,7 @@ static void processRequestAntIdentityTree(unsigned long long processorNumber, Pe
         item.parentTick = rec->parentRef.tick;
         item.parentSolutionIndexInTick = rec->parentRef.solutionIndexInTick;
         item.score = rec->score;
+        item.shift = rec->shift;
         item.childCount = gAntColony.childCountForQuery(rec->selfRef, rec->pubkey);
         item.anchorTick = rec->anchorTick;
         item.depth = rec->depth;
@@ -2999,6 +3019,8 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
 
     Processor* processor = (Processor*)ProcedureArgument;
     RequestResponseHeader* header = (RequestResponseHeader*)processor->buffer;
+    // a pass that handled a request goes straight to the next one; sleeping per message paces a 676-vote tick by the os timer quantum.
+    bool idle = true;
     while (!shutDownNode)
     {
         PinScope pinScope;
@@ -3006,7 +3028,11 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
         tickFork::requestProcessorParkPoint(processorNumber);
         if (shutDownNode)
             break;
-        std::this_thread::sleep_for(std::chrono::microseconds(50));
+        if (idle)
+        {
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+        idle = true;
         // in epoch transition, wait here
         if (epochTransitionState)
         {
@@ -3090,6 +3116,7 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
                 requestQueueElementTail++;
 
                 RELEASE(requestQueueTailLock);
+                idle = false;
                 switch (header->type())
                 {
                 case ExchangePublicPeers::type():
@@ -3893,9 +3920,10 @@ static void processTickTransactionSolution(const MiningSolutionTransaction* tran
                     }
                 }
 
-                // A miner is ranked by its single best score of the epoch, not by the number of
-                // accepted solutions
-                const unsigned int newScore = solutionScore * gScoreMultiplier[selectedAlgo];
+                // A miner is ranked by its single best rating of the epoch, not by the number of
+                // accepted solutions. A standalone solution carries no reach, so it ranks at frame 0.
+                const score_engine::Rating standaloneRating = { solutionScore, 0 };
+                const unsigned int newScore = standaloneRating.rankingKey();
                 const unsigned int newTick = system.tick;
                 updateMinerRankingAndFutureComputors(transaction->sourcePublicKey, newScore, newTick);
             }
@@ -4020,21 +4048,23 @@ static void processTickTransactionAntColonySolution(
     // quorum does not, so the disagreement lands in the same tick.
     const bool trustClaimedScore = isTrustingClaimedSolutionScore();
 
-    unsigned int childScore;
+    score_engine::Rating childRating = score_engine::Rating::worst();
     const AntColonyBpp9000T::Ann* childAnn = nullptr;
     if (trustClaimedScore)
     {
-        childScore = transaction->claimedScore;
+        // Only the walk yields the shift and the claim carries none; the parent's is the lowest it can be.
+        childRating.error = transaction->claimedScore;
+        childRating.shift = (parentRec != nullptr) ? parentRec->shift : 0u;
     }
     else if (gAntScoredReady[transactionIndex])
     {
-        childScore = gAntScoredValue[transactionIndex];
+        childRating = gAntScoredRating[transactionIndex];
         childAnn = &gAntScoredAnn[transactionIndex];
     }
     else
     {
-        // A null parent record means root, the scorer derives the shared epoch root, since roots
-        // are never stored and so cannot be handed in.
+        // A null parent record means root, the scorer derives the identity's own root from its
+        // public key, since roots are never stored and so cannot be handed in.
         const AntColonyBpp9000T::Ann* parentAnn = nullptr;
         if (parentRec != nullptr)
         {
@@ -4053,13 +4083,14 @@ static void processTickTransactionAntColonySolution(
         // queue did not drain in time, which is exactly the catch-up case the cache exists for.
         const AntColonyBpp9000T::ReplayKey replayKey =
             makeAntReplayKey(transaction->sourcePublicKey, transaction->nonce, parentRef, anchorDigest);
-        if (!gAntColony.tryGetReplayScore(replayKey, childScore, childAnnScratch))
+        // A root parent sits at frame 0.
+        const unsigned int parentShift = (parentRec != nullptr) ? parentRec->shift : 0u;
+        if (!gAntColony.tryGetReplayScore(replayKey, childRating, childAnnScratch))
         {
-            LiteParallelScore::Scope parallelScope(LiteParallelScore::TickPath);
-            childScore = score->computeAntChildScore(
-                processorNumber, parentAnn, transaction->sourcePublicKey, transaction->nonce,
+            childRating = score->computeAntChildScore(
+                processorNumber, parentAnn, parentShift, transaction->sourcePublicKey, transaction->nonce,
                 anchorDigest, childAnnScratch);
-            gAntColony.putReplayScore(replayKey, childScore, childAnnScratch);
+            gAntColony.putReplayScore(replayKey, childRating, childAnnScratch);
         }
         childAnn = &childAnnScratch;
     }
@@ -4067,7 +4098,7 @@ static void processTickTransactionAntColonySolution(
     // This and the two score rules inside commit() are the only checks decided by the score itself, and none
     // may fire on a trusted one: rejecting leaves no refund for the quorum to disagree with, so the tree
     // diverges in silence. Accepting turns the lie into a spectrum disagreement instead.
-    if (!trustClaimedScore && !score->isValidScore(childScore, score_engine::AlgoType::Bpp9000))
+    if (!trustClaimedScore && !childRating.isValid())
     {
         gAntColony.recordReject(ValidityResult::RejectNonCanonicalNonce);
         logAntSolutionOutcome(transaction, 0, ValidityResult::RejectNonCanonicalNonce);
@@ -4080,7 +4111,7 @@ static void processTickTransactionAntColonySolution(
     {
         KangarooTwelve(childAnn, sizeof(*childAnn), &childAnnHash, sizeof(childAnnHash));
     }
-    resourceTestingDigest ^= childScore;
+    resourceTestingDigest ^= childRating.digestValue();
     resourceTestingDigest ^= childAnnHash;
     KangarooTwelve(&resourceTestingDigest, sizeof(resourceTestingDigest), &resourceTestingDigest, sizeof(resourceTestingDigest));
 
@@ -4101,19 +4132,25 @@ static void processTickTransactionAntColonySolution(
         }
     }
 
-    result = gAntColony.commit(in, parentRec, childScore, childAnn, childAnnHash, trustClaimedScore);
-    logAntSolutionOutcome(transaction, childScore, result);
-    antDebugAccepted(transaction, childScore, (parentRec != nullptr) ? (parentRec->depth + 1) : 1,
+    result = gAntColony.commit(in, parentRec, childRating, childAnn, childAnnHash, trustClaimedScore);
+    logAntSolutionOutcome(transaction, childRating.error, result);
+    antDebugAccepted(transaction, childRating.error, (parentRec != nullptr) ? (parentRec->depth + 1) : 1,
         transactionIndex, result, trustClaimedScore);
 
-    // An accept that only stood because the score was trusted is the one that will disagree with quorum.
+    // An accept that only stood because the score was trusted is the one that may disagree with quorum.
     if (trustClaimedScore
         && (result == ValidityResult::Valid || result == ValidityResult::ValidNotStored))
     {
-        const unsigned int parentScore = (parentRec != nullptr) ? parentRec->score : WORST_SCORE;
-        const bool wouldHaveRejected = (childScore > gAntColony.errorThreshold())
-            || (childScore >= parentScore)
-            || !score->isValidScore(childScore, score_engine::AlgoType::Bpp9000);
+        score_engine::Rating parentRating = score_engine::Rating::worst();
+        if (parentRec != nullptr)
+        {
+            parentRating.error = parentRec->score;
+            parentRating.shift = parentRec->shift;
+        }
+        // Judged at the guessed shift: a walk that slid the frame further passes where this says it fails.
+        const bool wouldHaveRejected = !childRating.isValid()
+            || !childRating.clearsFloor(gAntColony.errorThreshold())
+            || !childRating.isBetterThan(parentRating);
         if (wouldHaveRejected && antDebugCanPrint())
         {
             CHAR16 msg[256];
@@ -4122,12 +4159,12 @@ static void processTickTransactionAntColonySolution(
             appendText(msg, L" idx ");
             appendNumber(msg, transactionIndex, FALSE);
             appendText(msg, L" score ");
-            appendNumber(msg, childScore, FALSE);
+            appendNumber(msg, childRating.error, FALSE);
             appendText(msg, L" threshold ");
             appendNumber(msg, gAntColony.errorThreshold(), FALSE);
             appendText(msg, L" parentScore ");
-            appendNumber(msg, parentScore, FALSE);
-            appendText(msg, L" - expect a spectrum disagreement this tick");
+            appendNumber(msg, parentRating.error, FALSE);
+            appendText(msg, L" - a spectrum disagreement may follow this tick");
             logToConsole(msg);
         }
     }
@@ -4140,7 +4177,7 @@ static void processTickTransactionAntColonySolution(
 
     // Refund AND ranking. A valid solution is refunded whether or not it improved this miner's best,
     // and whether or not the store had room for it, ranking is best-score-only
-    if (transaction->claimedScore == childScore)
+    if (transaction->claimedScore == childRating.error)
     {
         // Refund if this score == its claimed score and the ann tree check
         increaseEnergy(transaction->sourcePublicKey, transaction->amount);
@@ -4148,8 +4185,8 @@ static void processTickTransactionAntColonySolution(
         const QuTransfer quTransfer = { m256i::zero(), transaction->sourcePublicKey, transaction->amount };
         logger.logQuTransfer(quTransfer);
 
-        // A miner is ranked by its single best score of the epoch
-        const unsigned int newScore = childScore * gScoreMultiplier[score_engine::AlgoType::Bpp9000];
+        // A miner is ranked by its single best rating of the epoch: reach first, then errors.
+        const unsigned int newScore = childRating.rankingKey();
         updateMinerRankingAndFutureComputors(transaction->sourcePublicKey, newScore, system.tick);
     }
 }
@@ -4632,7 +4669,7 @@ static void publishAntSolutionFor(unsigned long long processorNumber, unsigned i
     const unsigned int publishTick = system.tick + MIN_MINING_SOLUTIONS_PUBLICATION_OFFSET;
     const unsigned int childCount = gAntColony.childCountForQuery(entry.parentRef,
         entry.computorPublicKey);
-    const ChildCandidate candidate{ entry.computorPublicKey, entry.score, entry.anchorTick, publishTick };
+    const ChildCandidate candidate{ entry.computorPublicKey, entry.rating, entry.anchorTick, publishTick };
     if (AntColonyBpp9000T::validateChild(candidate, parentRec, childCount,
         gAntColony.errorThreshold()) != ValidityResult::Valid)
     {
@@ -4652,7 +4689,7 @@ static void publishAntSolutionFor(unsigned long long processorNumber, unsigned i
     payload.parentTick = entry.parentRef.tick;
     payload.parentSolutionIndexInTick = entry.parentRef.solutionIndexInTick;
     payload.anchorTick = entry.anchorTick;
-    payload.claimedScore = entry.score;
+    payload.claimedScore = entry.rating.error;
     payload.nonce = entry.nonce;
 
     unsigned char digest[32];
@@ -4798,6 +4835,9 @@ static void processTick(unsigned long long processorNumber)
 #if ADDON_TX_STATUS_REQUEST
         txStatusData.tickTxIndexStart[system.tick - system.initialTick] = numberOfTransactions; // qli: part of tx_status_request add-on
 #endif
+        // A record rebuilt since the last tick may have reached further than the guess it was ranked on.
+        AntColonyMaintenance::drainRaisedShifts(gAntColony, updateMinerRankingAndFutureComputors);
+
         // Only apply skipping compute solution when in Mainnet with Aux node (except for last tick).
         // A strict replay computes too, and this is what clears the per-transaction pre-score gates so it
         // cannot read the previous tick's answers.
@@ -8871,20 +8911,32 @@ static bool loadBpp9000Task()
 {
     const unsigned int N = (unsigned int)BPP9000_NUMBER_OF_INPUT_NEURONS;
     const unsigned int M = (unsigned int)BPP9000_NUMBER_OF_OUTPUT_NEURONS;
-    const unsigned int P = (unsigned int)BPP9000_POPULATION_THRESHOLD;
-    const unsigned int K = (unsigned int)BPP9000_NUMBER_OF_NEIGHBORS;
     const unsigned long long T = BPP9000_SEQUENCE_LENGTH;
-
-    const unsigned long long topoBytes = score_task_file::topologyBytes(N, M, P, K);
-    const unsigned long long dataBytes = score_task_file::dataBytes(N, M, T);
     const unsigned long long headerBytes = sizeof(score_task_file::TaskFileHeader);
+
+    // The task ships inside the binary and is written out first, so every read below sees this build's copy.
+    if (save(SCORE_BPP9000_TASK_FILE_NAME, BPP9000_TASK_SIZE, BPP9000_TASK_BYTES, NULL) != (long long)BPP9000_TASK_SIZE)
+    {
+        logToConsole(L"Failed to extract the embedded bpp9000 task.");
+        return false;
+    }
+
+    // Read the header first: the topology block is sized by the file's own population, which need not match
+    // the configured one (the wiring comes from the pubkey, not the task).
+    score_task_file::TaskFileHeader fileHeader;
+    if (load(SCORE_BPP9000_TASK_FILE_NAME, headerBytes, (unsigned char*)&fileHeader, NULL) != (long long)headerBytes)
+    {
+        logToConsole(L"bpp9000 task file missing or too short - node will not do score verification.");
+        return false;
+    }
+    const unsigned long long topoBytes = score_task_file::topologyBytes(
+        fileHeader.numInputTrits, fileHeader.numOutputTrits, fileHeader.population, fileHeader.numNeighbors);
+    const unsigned long long dataBytes = score_task_file::dataBytes(N, M, T);
     const unsigned long long totalBytes = headerBytes + topoBytes + dataBytes;
 
     // The canonical task may carry more samples than the configured sequence length consumes, so the
     // embedded blob only has to cover totalBytes; anything past that is never read.
-    if (totalBytes > BPP9000_TASK_SIZE
-        || save(SCORE_BPP9000_TASK_FILE_NAME, BPP9000_TASK_SIZE, BPP9000_TASK_BYTES, NULL)
-            != (long long)BPP9000_TASK_SIZE)
+    if (totalBytes > BPP9000_TASK_SIZE)
     {
         logToConsole(L"Failed to extract the embedded bpp9000 task.");
         return false;
@@ -8907,19 +8959,28 @@ static bool loadBpp9000Task()
         const unsigned char* topoBlock = gBpp9000TaskBuffer + headerBytes;
         const unsigned char* dataBlock = topoBlock + topoBytes;
 
-        unsigned char topoHash[32];
         unsigned char dataHash[32];
-        KangarooTwelve(topoBlock, (unsigned int)topoBytes, topoHash, 32);
         KangarooTwelve(dataBlock, (unsigned int)dataBytes, dataHash, 32);
+#if BPP9000_TASK_HAS_TOPOLOGY
+        unsigned char topoHash[32];
+        KangarooTwelve(topoBlock, (unsigned int)topoBytes, topoHash, 32);
+#endif
 
         if (h->magic != score_task_file::MAGIC || h->version != score_task_file::VERSION
-            || h->numInputTrits != N || h->numOutputTrits != M || h->population != P
-            || h->numNeighbors != K || h->numPairs < T)
+            || h->numInputTrits != N || h->numOutputTrits != M
+#if BPP9000_TASK_HAS_TOPOLOGY
+            || h->population != (unsigned int)BPP9000_POPULATION_THRESHOLD
+            || h->numNeighbors != (unsigned int)BPP9000_NUMBER_OF_NEIGHBORS
+#endif
+            || h->numPairs < T)
         {
             logToConsole(L"bpp9000 task header does not match configured parameters - node will not do score verification.");
         }
-        else if (*(const m256i*)topoHash != *(const m256i*)BPP9000_TOPOLOGY_HASH
-              || *(const m256i*)dataHash != *(const m256i*)BPP9000_DATA_HASH)
+        else if (
+#if BPP9000_TASK_HAS_TOPOLOGY
+                 *(const m256i*)topoHash != *(const m256i*)BPP9000_TOPOLOGY_HASH ||
+#endif
+                 *(const m256i*)dataHash != *(const m256i*)BPP9000_DATA_HASH)
         {
             logToConsole(L"bpp9000 task hash mismatch (not the pinned canonical task) - node will not do score verification.");
         }
@@ -8953,9 +9014,9 @@ static bool applyBpp9000Task()
         return false;
     }
     const unsigned long long headerBytes = sizeof(score_task_file::TaskFileHeader);
+    const score_task_file::TaskFileHeader* h = (const score_task_file::TaskFileHeader*)gBpp9000TaskBuffer;
     const unsigned long long topoBytes = score_task_file::topologyBytes(
-        (unsigned int)BPP9000_NUMBER_OF_INPUT_NEURONS, (unsigned int)BPP9000_NUMBER_OF_OUTPUT_NEURONS,
-        (unsigned int)BPP9000_POPULATION_THRESHOLD, (unsigned int)BPP9000_NUMBER_OF_NEIGHBORS);
+        h->numInputTrits, h->numOutputTrits, h->population, h->numNeighbors);
     const unsigned char* topoBlock = gBpp9000TaskBuffer + headerBytes;
     const unsigned char* dataBlock = topoBlock + topoBytes;
     return score->loadTask(topoBlock, dataBlock);
@@ -9580,7 +9641,6 @@ static void deinitialize()
     fastTxWindow.deinit();
     gAntPendingSolutions.deinit();
     AntWalker::stop();
-    LiteParallelScore::stop();
     gAntColony.deinit();
 
     if (score)
@@ -10713,7 +10773,6 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     forkCensusResetForChildPromote();
     const unsigned int releasedAntClaims = AntColonyMaintenance::releaseInheritedClaims(gAntColony);
     AntWalker::restartAfterPromote();
-    LiteParallelScore::restartAfterPromote();
     if (releasedAntClaims)
     {
         fprintf(stderr, "[FORK] CHILD: released %u inherited ant network claims\n", releasedAntClaims);
@@ -11863,8 +11922,6 @@ void processArgs(int argc, const char* argv[]) {
         ("ant-debug", "Trace ant-colony accepts, over-accepts and network rebuilds (budgeted per epoch)", cxxopts::value<bool>())
         ("ant-walker-threads", "Ant network walks handed to the walker sidecar (0=off)", cxxopts::value<unsigned int>()->default_value("0"))
         ("ant-walker-debug", "Trace every ant walker job and result", cxxopts::value<bool>())
-        ("parallel-score-threads", "Threads per ant score step, caller included (0=off, -1=auto: min(32, max(2, cpus/2)))", cxxopts::value<int>()->default_value("-1"))
-        ("score-stuck-early-out", "Return INFINITE_ERROR as soon as a window provably never settles (1=on, 0=off)", cxxopts::value<int>()->default_value("1"))
 #if defined(__linux__) && !defined(LITE_WASM_SC)
         ("verify-fork-rollback", "TEST: assert fork re-run reproduces quorum digest", cxxopts::value<bool>())
         ("fork-force-fork", "TEST: fork every tick (exercise MATCH path)", cxxopts::value<bool>())
@@ -12095,20 +12152,6 @@ void processArgs(int argc, const char* argv[]) {
         {
             logColorToScreen("INFO", "Ant walker sidecar enabled, " + std::to_string(antWalkerThreads)
                 + " threads, socket " + antWalkerSocket);
-        }
-    }
-
-    {
-        const int parallelScoreThreads = result["parallel-score-threads"].as<int>();
-        LiteParallelScore::configure(parallelScoreThreads);
-        if (parallelScoreThreads == 0)
-        {
-            logColorToScreen("INFO", "Parallel ant score disabled");
-        }
-        score_engine::ScoreBpp9000T::stuckLaneEarlyOut = result["score-stuck-early-out"].as<int>() != 0;
-        if (!score_engine::ScoreBpp9000T::stuckLaneEarlyOut)
-        {
-            logColorToScreen("INFO", "Score stuck-lane early-out disabled");
         }
     }
 
@@ -12538,7 +12581,6 @@ int main(int argc, const char* argv[])
     startRpcServices();
 #endif
     AntWalker::start();
-    LiteParallelScore::start();
 #if defined(LITE_WASM_SC) && !defined(NO_RPC)
     // Wasm testnet serves HTTP in-process; the unix-socket/sidecar stack is compiled out.
     QubicHttpServer::start(httpPort);
