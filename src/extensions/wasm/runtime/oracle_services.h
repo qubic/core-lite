@@ -15,8 +15,9 @@ static const UserProcedureRegistry::UserProcedureData* oracleNotification(unsign
     unsigned int replySize)
 {
     const UserProcedureRegistry::UserProcedureData* notification;
-    if (!userProcedureRegistry || !(notification = userProcedureRegistry->get(notificationProcedureId)) || notification->contractIndex != contractIndex
-        || notification->inputSize != 16 + replySize)
+    // a row disabled by an unload has no procedure to notify
+    if (!userProcedureRegistry || !(notification = userProcedureRegistry->get(notificationProcedureId)) || !notification->procedure
+        || notification->contractIndex != contractIndex || notification->inputSize != 16 + replySize)
     {
         return nullptr;
     }

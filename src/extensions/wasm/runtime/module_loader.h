@@ -110,6 +110,11 @@ static void unloadSlot(EngineSlot& slot)
             contractUserProcedureInputSizes[binding.contractIndex][binding.inputType] = 0;
             contractUserProcedureOutputSizes[binding.contractIndex][binding.inputType] = 0;
             contractUserProcedureLocalsSizes[binding.contractIndex][binding.inputType] = 0;
+            // the notification row too: an id the next module registers again is re-enabled by its registration
+            if (userProcedureRegistry)
+            {
+                userProcedureRegistry->disable((binding.contractIndex << 22) | binding.inputType);
+            }
         }
 
         if (slot.entryClosures[entryIndex])

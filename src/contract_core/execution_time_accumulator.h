@@ -70,6 +70,15 @@ public:
 #endif
     }
 
+    // The current phase's accumulated time of one contract (microseconds, or CPU ticks without a frequency), read under the lock.
+    unsigned long long getCurrentPhaseAccumulatedTime(unsigned int contractIndex)
+    {
+        ACQUIRE(lock);
+        const unsigned long long time = contractExecutionTimePerPhase[contractExecutionTimeActiveArrayIndex][contractIndex];
+        RELEASE(lock);
+        return time;
+    }
+
     // Returns a pointer to the accumulated times from the previous phase for each contract.
     // Make sure to acquire the lock before calling this function and only release it when finished accessing the returned data.
     const unsigned long long* getPrevPhaseAccumulatedTimes()

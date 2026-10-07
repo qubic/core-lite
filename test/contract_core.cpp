@@ -8,6 +8,7 @@
 #include "contract_testing.h"
 
 #include <chrono>
+#include <memory>
 
 TEST(TestCoreContractCore, StackBuffer)
 {
@@ -220,4 +221,38 @@ TEST(TestCoreContractCore, isPublicKeyOfContract)
     {
         EXPECT_EQ(isPublicKeyOfContractMaskedCheck(keys[i]), isPublicKeyOfContract(keys[i]));
     }
+}
+
+// a redeployed contract registers its notification ids again: each id keeps its own row, and an unloaded module's rows are disabled
+TEST(TestCoreContractCore, UserProcedureRegistryReRegistration)
+{
+    auto registry = std::make_unique<UserProcedureRegistry>();
+    registry->init();
+    const auto procedure = [](unsigned long long value) { return reinterpret_cast<USER_PROCEDURE>(value); };
+    const unsigned int idA = (31u << 22) | 163;
+    const unsigned int idB = (32u << 22) | 163;
+    const unsigned int idC = (33u << 22) | 30;
+
+    EXPECT_TRUE(registry->add(idA, { procedure(1), 31, 0, 32, 0 }));
+    EXPECT_TRUE(registry->add(idB, { procedure(2), 32, 0, 32, 0 }));
+    // the redeploy registers idA again, then another contract registers a new id
+    EXPECT_TRUE(registry->add(idA, { procedure(3), 31, 0, 32, 0 }));
+    EXPECT_TRUE(registry->add(idC, { procedure(4), 33, 0, 48, 0 }));
+    EXPECT_EQ(registry->get(idA)->procedure, procedure(3));
+    EXPECT_EQ(registry->get(idB)->procedure, procedure(2));
+    EXPECT_EQ(registry->get(idC)->procedure, procedure(4));
+    EXPECT_EQ(registry->get(idC)->contractIndex, 33u);
+
+    // an unloaded module's id keeps its row without a procedure until it is registered again
+    registry->disable(idA);
+    ASSERT_NE(registry->get(idA), nullptr);
+    EXPECT_EQ(registry->get(idA)->procedure, nullptr);
+    EXPECT_EQ(registry->get(idB)->procedure, procedure(2));
+    EXPECT_TRUE(registry->add(idA, { procedure(5), 31, 0, 32, 0 }));
+    EXPECT_EQ(registry->get(idA)->procedure, procedure(5));
+    EXPECT_EQ(registry->get(idC)->procedure, procedure(4));
+
+    // an id nobody registered stays unknown
+    registry->disable(12345);
+    EXPECT_EQ(registry->get(12345), nullptr);
 }

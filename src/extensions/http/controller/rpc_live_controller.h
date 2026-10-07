@@ -318,8 +318,29 @@ RPC_ROUTE("GET", "/live/v1/balances/:id")
     Json::Value result;
     Json::Value balance;
     m256i identityPublicKey;
-    getPublicKeyFromIdentity(reinterpret_cast<const unsigned char *>(idStr.c_str()), identityPublicKey.m256i_u8);
-    auto spectrumInfo = spectrum[spectrumIndex(identityPublicKey)];
+    bool identityValid = idStr.size() == 60 && getPublicKeyFromIdentity(reinterpret_cast<const unsigned char *>(idStr.c_str()), identityPublicKey.m256i_u8);
+    if (identityValid)
+    {
+        // the decoder reads the 56 key letters only; the last 4 are a checksum, so re-encode and compare
+        CHAR16 canonical[61];
+        getIdentity(identityPublicKey.m256i_u8, canonical, false);
+        for (int i = 0; i < 60 && identityValid; i++)
+        {
+            identityValid = canonical[i] == (CHAR16)idStr[i];
+        }
+    }
+    if (!identityValid)
+    {
+        return rpcErr(3, "invalid identity: 60 uppercase letters with a matching checksum expected");
+    }
+    // a key the spectrum does not hold has index -1: it is an entity with nothing, not the record before the array
+    EntityRecord spectrumInfo;
+    setMem(&spectrumInfo, sizeof(spectrumInfo), 0);
+    const int index = spectrumIndex(identityPublicKey);
+    if (index >= 0)
+    {
+        spectrumInfo = spectrum[index];
+    }
     balance["id"] = idStr;
     balance["balance"] = std::to_string(spectrumInfo.incomingAmount - spectrumInfo.outgoingAmount);
     balance["validForTick"] = system.tick;
@@ -586,6 +607,9 @@ RPC_ROUTE("GET", "/live/v1/dyn-registry")
         contractJson["source"] = slot.sourceH;
         contractJson["lastError"] = Wasm::Runtime::lastTrap(slotIndex);
         contractJson["feeReserve"] = std::to_string(getContractFeeReserve(slotIndex));
+        // open phase's running total, converted as buildExecutionFeeReportPayload does; the charge is the computors' quorum over these reports
+        const unsigned long long phaseTime = executionTimeAccumulator.getCurrentPhaseAccumulatedTime(slotIndex);
+        contractJson["executionFee"] = std::to_string(executionTimeMultiplierDenominator ? phaseTime * executionTimeMultiplierNumerator / executionTimeMultiplierDenominator : 0ULL);
         contractsJson.append(contractJson);
     }
     json["slotBase"] = (unsigned int)WASM_RESERVED_SLOT_BASE;
@@ -1272,6 +1296,10 @@ RPC_ROUTE("GET", "/live/v1/dev/oracle-pending")
         if (pending.interfaceIndex >= OI::oracleInterfacesCount)
             continue;
 
+        // an answered query stays pending until its commits land, but it no longer waits for a reply
+        if (oracleEngine.getOracleQueryStatusFlags(pending.queryId) & ORACLE_FLAG_REPLY_RECEIVED)
+            continue;
+
         const uint16_t querySize = (uint16_t)OI::oracleInterfaces[pending.interfaceIndex].querySize;
         unsigned char queryData[MAX_ORACLE_QUERY_SIZE];
         if (!oracleEngine.getOracleQuery(pending.queryId, queryData, querySize))
@@ -1336,13 +1364,15 @@ RPC_ROUTE("POST", "/live/v1/dev/oracle-resolve")
         }
 
         const uint8_t statusBefore = oracleEngine.getOracleQueryStatus(queryId);
+        // a second answer to an answered query changes nothing the contract sees, so it is not accepted
+        const bool answeredBefore = (oracleEngine.getOracleQueryStatusFlags(queryId) & ORACLE_FLAG_REPLY_RECEIVED) != 0;
         const unsigned int replySize = (status == ORACLE_QUERY_STATUS_SUCCESS) ? (unsigned int)reply.size() : 0;
         oracleEngine.processOracleMachineReply(&machineReply.metadata, sizeof(OracleMachineReply) + replySize);
 
         // the engine returns nothing, so acceptance is read back from the flags it records on the query.
         const uint16_t statusFlags = oracleEngine.getOracleQueryStatusFlags(queryId);
         const uint16_t acceptedFlag = (status == ORACLE_QUERY_STATUS_SUCCESS) ? ORACLE_FLAG_REPLY_RECEIVED : ORACLE_FLAG_OM_ERROR_FLAGS;
-        json["ok"] = statusBefore == ORACLE_QUERY_STATUS_PENDING && (statusFlags & acceptedFlag) != 0;
+        json["ok"] = statusBefore == ORACLE_QUERY_STATUS_PENDING && !answeredBefore && (statusFlags & acceptedFlag) != 0;
         json["status"] = oracleEngine.getOracleQueryStatus(queryId);
         return jsonResp(json);
     }
