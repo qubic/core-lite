@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 env:
-  CORE_GTEST_FILTER: 'TestFourQ.*:TestCore256*:TestCoreK12*:ContractInvocationAlignment.*'
+  CORE_GTEST_FILTER: 'TestFourQ.*:TestCore256*:TestCoreK12*:TestCoreLogging.*:ContractInvocationAlignment.*'
   STATE_GTEST_FILTER: 'K12DigestCacheTest.*:ContractStatePagerTest.*'
   WASM_GTEST_FILTER: 'WasmContracts.*'
 

@@ -527,9 +527,6 @@ namespace tickStorageScan
 
         std::fprintf(stdout, "[SCAN] Offline mode: stop the node before scanning its runtime directory\n");
         enableAVX();
-#if defined(__AVX512F__) && !GENERIC_K12
-        initAVX512KangarooTwelveConstants();
-#endif
         if (!installSignalHandler())
         {
             std::fprintf(stderr, "[SCAN] cannot install SwapVM dirty-tracking handler\n");

@@ -1,20 +1,23 @@
 #pragma once
 
-#include <K12/kangaroo_twelve_xkcp.h>
+#include <kangaroo_twelve.h>
 
 #include <cstddef>
 #include <cstring>
 #include <vector>
 
+// Chaining-value cache for one contract state: KangarooTwelve hashes every full K12_chunkSize chunk
+// after the first as an independent leaf, so only the leaves of changed chunks are rehashed. Chunk 0
+// and the partial tail are always re-read; their change flags are never cleared.
 class K12DigestCache
 {
 protected:
     struct Intermediate
     {
-        unsigned char intermediate[maxCapacityInBytes];
+        unsigned char intermediate[K12_capacityInBytes];
     };
 
-    // Per-chunk intermediate hashes and dirty flags.
+    // Per-chunk chaining values and dirty flags.
     std::vector<Intermediate> intermediateMap;
     std::vector<unsigned char> isChunkChangedMap;
     unsigned int maxChunks;
@@ -23,97 +26,6 @@ protected:
 
     unsigned char *_lastOutput;
     size_t _lastOutputSize;
-
-    int _KangarooTwelve_Update(XKCP::KangarooTwelve_Instance *ktInstance, const unsigned char *input, size_t inputByteLen, bool useCache)
-    {
-        if (ktInstance->phase != XKCP::ABSORBING)
-            return 1;
-
-        if (ktInstance->blockNumber == 0)
-        {
-            /* First block, absorb in final node */
-            unsigned int len = inputByteLen < (K12_chunkSize - ktInstance->queueAbsorbedLen) ? (unsigned int)inputByteLen : (K12_chunkSize - ktInstance->queueAbsorbedLen);
-            XKCP::TurboSHAKE_Absorb(&ktInstance->finalNode, input, len);
-            input += len;
-            inputByteLen -= len;
-            ktInstance->queueAbsorbedLen += len;
-            if ((ktInstance->queueAbsorbedLen == K12_chunkSize) && (inputByteLen != 0))
-            {
-                /* First block complete and more input data available, finalize it */
-                const unsigned char padding = 0x03; /* '110^6': message hop, simple padding */
-                ktInstance->queueAbsorbedLen = 0;
-                ktInstance->blockNumber = 1;
-                XKCP::TurboSHAKE_Absorb(&ktInstance->finalNode, &padding, 1);
-                // Zero-pad to the next 64-bit boundary.
-                ktInstance->finalNode.byteIOIndex = (ktInstance->finalNode.byteIOIndex + 7) & ~7;
-            }
-        }
-        else if (ktInstance->queueAbsorbedLen != 0)
-        {
-            /* There is data in the queue, absorb further in queue until block complete */
-            unsigned int len = inputByteLen < (K12_chunkSize - ktInstance->queueAbsorbedLen) ? (unsigned int)inputByteLen : (K12_chunkSize - ktInstance->queueAbsorbedLen);
-            XKCP::TurboSHAKE_Absorb(&ktInstance->queueNode, input, len);
-            input += len;
-            inputByteLen -= len;
-            ktInstance->queueAbsorbedLen += len;
-            if (ktInstance->queueAbsorbedLen == K12_chunkSize)
-            {
-                int capacityInBytes = 2 * (ktInstance->securityLevel) / 8;
-                unsigned char intermediate[maxCapacityInBytes];
-                // assert(capacityInBytes <= maxCapacityInBytes);
-                ktInstance->queueAbsorbedLen = 0;
-                ++ktInstance->blockNumber;
-                XKCP::TurboSHAKE_AbsorbDomainSeparationByte(&ktInstance->queueNode, K12_suffixLeaf);
-                XKCP::TurboSHAKE_Squeeze(&ktInstance->queueNode, intermediate, capacityInBytes);
-                XKCP::TurboSHAKE_Absorb(&ktInstance->finalNode, intermediate, capacityInBytes);
-            }
-        }
-
-        while (inputByteLen > 0)
-        {
-            int capacityInBytes = 2 * (ktInstance->securityLevel) / 8;
-            unsigned int len = inputByteLen < K12_chunkSize ? (unsigned int)inputByteLen : K12_chunkSize;
-            unsigned int chunkIndex = ktInstance->blockNumber;
-
-            if (!isChunkChangedMap[chunkIndex] && useCache)
-            {
-                if (len == K12_chunkSize)
-                {
-                    unsigned char *intermediate = intermediateMap[chunkIndex].intermediate;
-                    XKCP::TurboSHAKE_Absorb(&ktInstance->finalNode, intermediate, capacityInBytes);
-                    input += len;
-                    inputByteLen -= len;
-                    ++ktInstance->blockNumber;
-                    continue;
-                }
-            }
-
-            XKCP::TurboSHAKE_Initialize(&ktInstance->queueNode, ktInstance->securityLevel);
-            XKCP::TurboSHAKE_Absorb(&ktInstance->queueNode, input, len);
-            input += len;
-            inputByteLen -= len;
-            if (len == K12_chunkSize)
-            {
-                unsigned char intermediate[maxCapacityInBytes];
-                // assert(capacityInBytes <= maxCapacityInBytes);
-                ++ktInstance->blockNumber;
-                XKCP::TurboSHAKE_AbsorbDomainSeparationByte(&ktInstance->queueNode, K12_suffixLeaf);
-                XKCP::TurboSHAKE_Squeeze(&ktInstance->queueNode, intermediate, capacityInBytes);
-                XKCP::TurboSHAKE_Absorb(&ktInstance->finalNode, intermediate, capacityInBytes);
-
-                // Cache the intermediate state.
-                Intermediate &inter = intermediateMap[chunkIndex];
-                std::memcpy(inter.intermediate, intermediate, capacityInBytes);
-                isChunkChangedMap[chunkIndex] = false;
-            }
-            else
-            {
-                ktInstance->queueAbsorbedLen = len;
-            }
-        }
-
-        return 0;
-    }
 
 public:
     K12DigestCache(unsigned char *state, size_t stateSize)
@@ -130,7 +42,7 @@ public:
         }
         for (unsigned int i = 0; i < maxChunks; i++)
         {
-            std::memset(intermediateMap[i].intermediate, 0, maxCapacityInBytes);
+            std::memset(intermediateMap[i].intermediate, 0, K12_capacityInBytes);
         }
 
         _lastOutput = new unsigned char[1024];
@@ -142,8 +54,12 @@ public:
         delete[] _lastOutput;
     }
 
+    // Digest of the state, bit-identical to KangarooTwelve(state, stateSize, output, 32). Returns 0 on
+    // success. With useCache == false every leaf is rehashed but still cached.
     int getHash(unsigned char* output, size_t outputByteLen, bool useCache = true)
     {
+        if (outputByteLen != K12_capacityInBytes)
+            return 1;
         if (_lastOutput && outputByteLen == _lastOutputSize && isAllChunksUnchanged())
         {
             // Reuse the complete digest when no chunk changed.
@@ -151,20 +67,35 @@ public:
             return 0;
         }
 
-        XKCP::KangarooTwelve_Instance ktInstance;
-
-        if (outputByteLen == 0)
-            return 1;
-        XKCP::KangarooTwelve_Initialize(&ktInstance, 128, outputByteLen);
-        if (_KangarooTwelve_Update(&ktInstance, _state, _stateSize, useCache) != 0)
-            return 1;
-        int ok = XKCP::KangarooTwelve_Final(&ktInstance, output, nullptr, 0);
+        KangarooTwelveStream stream;
+        stream.init();
+        if (_stateSize <= K12_chunkSize)
+        {
+            stream.update(_state, _stateSize);
+        }
+        else
+        {
+            stream.update(_state, K12_chunkSize);
+            size_t offset = K12_chunkSize;
+            for (unsigned int chunkIndex = 1; offset + K12_chunkSize <= _stateSize; chunkIndex++, offset += K12_chunkSize)
+            {
+                Intermediate &inter = intermediateMap[chunkIndex];
+                if (isChunkChangedMap[chunkIndex] || !useCache)
+                {
+                    KangarooTwelveLeaf(_state + offset, inter.intermediate);
+                    isChunkChangedMap[chunkIndex] = false;
+                }
+                stream.absorbChainingValue(inter.intermediate);
+            }
+            stream.update(_state + offset, _stateSize - offset);
+        }
+        stream.finalize(output);
 
         // Cache the complete digest.
         std::memcpy(_lastOutput, output, outputByteLen);
         _lastOutputSize = outputByteLen;
 
-        return ok;
+        return 0;
     }
 
     void markChunkChanged(unsigned int chunkIndex)

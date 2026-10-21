@@ -69,6 +69,7 @@ add_executable(
    		file_io.cpp
    		fourq.cpp
    		kangaroo_twelve.cpp
+   		logging_digest.cpp
    		m256.cpp
    		math_lib.cpp
    		network_messages.cpp

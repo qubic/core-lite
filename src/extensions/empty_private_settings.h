@@ -50,6 +50,7 @@ static const unsigned char ocMachineIPs[][4] = {
 #endif
 
 #define USE_PARALLEL_SIGN_VOTES 1
+#define USE_PARALLEL_K12_LEAVES 1 // hash the leaves of large contract states on the request processors
 
 // Virtual memory settings for logging
 #if defined(TESTNET) && defined(TESTNET_LITE_RAM)

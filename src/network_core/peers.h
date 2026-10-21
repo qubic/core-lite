@@ -1516,12 +1516,12 @@ static void peerReconnectIfInactive(unsigned int i, unsigned short port)
                 peers[i].isOMNode = FALSE;
                 peers[i].isOcMachine = FALSE;
                 // randomly select public peer and try to connect if we do not
-                // yet have an outgoing connection to it. Guard the empty case:
-                // random(0) is a modulo-by-zero (SIGFPE) — a node started with no
-                // public peers (e.g. only a self/loopback --peers entry) hits it.
+                // yet have an outgoing connection to it. Empty list (e.g. only a
+                // self/loopback --peers entry): random(0) divides by zero, and a
+                // stale address would be redialled below, so clear it.
                 refillPublicPeersFromInactive();
-                if (numberOfPublicPeers)
-                    peers[i].address = publicPeers[random(numberOfPublicPeers)].address;
+                const unsigned int publicPeerCount = numberOfPublicPeers;
+                peers[i].address.u32 = publicPeerCount ? publicPeers[random(publicPeerCount)].address.u32 : 0;
             }
 
             if (peers[i].address.u32 != 0)

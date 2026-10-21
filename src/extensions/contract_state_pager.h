@@ -379,17 +379,9 @@ private:
 
     void seedZeroStateCache()
     {
-        const int securityLevel = 128;
-        const int capacityInBytes = 2 * securityLevel / 8;
         static const unsigned char zeroChunk[K12_chunkSize] = {};
         Intermediate zeroIntermediate;
-        std::memset(zeroIntermediate.intermediate, 0, maxCapacityInBytes);
-
-        XKCP::TurboSHAKE_Instance queue;
-        XKCP::TurboSHAKE_Initialize(&queue, securityLevel);
-        XKCP::TurboSHAKE_Absorb(&queue, zeroChunk, K12_chunkSize);
-        XKCP::TurboSHAKE_AbsorbDomainSeparationByte(&queue, K12_suffixLeaf);
-        XKCP::TurboSHAKE_Squeeze(&queue, zeroIntermediate.intermediate, capacityInBytes);
+        KangarooTwelveLeaf(zeroChunk, zeroIntermediate.intermediate);
 
         for (unsigned int i = 0; i < maxChunks; i++)
         {

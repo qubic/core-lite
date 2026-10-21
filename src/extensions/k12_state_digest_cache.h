@@ -5,10 +5,11 @@
 // into a final node), so a byte change in one chunk only invalidates that chunk's CV. We cache
 // the CVs per contract and, using mprotect-read-only + the SIGSEGV handler to learn which chunks
 // changed since the last digest, re-hash only the dirty chunks and reuse the rest. The result is
-// byte-identical to the one-shot KangarooTwelve because every non-cached step is the upstream
-// XKCP path verbatim. All state stays in RAM. On by default on Linux; --no-k12-state-cache off.
+// byte-identical to the one-shot KangarooTwelve: dirty leaves go through KangarooTwelveLeaf() and
+// cached ones through KangarooTwelveStream::absorbChainingValue(), the same tree steps as the
+// one-shot. All state stays in RAM. On by default on Linux; --no-k12-state-cache off.
 
-#include "../K12/kangaroo_twelve_xkcp.h"   // XKCP primitives + K12_chunkSize/K12_suffixLeaf/maxCapacityInBytes + copyMem/setMem
+#include "../kangaroo_twelve.h"   // KangarooTwelveStream/KangarooTwelveLeaf + K12_chunkSize/K12_capacityInBytes + copyMem/setMem
 
 #if defined(__linux__)
 #include <sys/mman.h>
@@ -21,68 +22,38 @@
 namespace K12StateDigestCache
 {
     inline constexpr unsigned int K12SDC_CHUNK = K12_chunkSize;   // 8192
-    inline constexpr unsigned int K12SDC_CV    = 32;              // KT128 capacity (2*128/8)
-    inline constexpr int          K12SDC_SEC   = 128;
+    inline constexpr unsigned int K12SDC_CV    = K12_capacityInBytes;   // 32
 
-    // Bit-exact with XKCP::KangarooTwelve(state,size,out,32). cvCache holds 32 bytes per chunk;
-    // only chunks with chunkDirty[k] set are re-hashed (and their CV re-cached), the rest reuse
-    // cvCache[k]. The finalNode absorption order mirrors KangarooTwelve_Update + _Final verbatim,
-    // which is what makes the output identical. cvCache[0] is unused (chunk 0 has no CV). Pure,
-    // self-contained (XKCP + copyMem only) so it is unit-testable without the node TU.
+    // Bit-exact with KangarooTwelve(state,size,out,32). cvCache holds 32 bytes per chunk; only
+    // chunks with chunkDirty[k] set are re-hashed (and their CV re-cached), the rest reuse cvCache[k].
+    // cvCache[0] is unused (chunk 0 goes into the final node, no CV); the partial tail is always
+    // re-read. Pure, self-contained so it is unit-testable without the node TU.
     inline void incrementalDigest(const unsigned char* state, unsigned long long size,
                                   unsigned char* cvCache, const unsigned char* chunkDirty,
                                   unsigned char* out)
     {
+        KangarooTwelveStream stream;
+        stream.init();
         if (size <= K12SDC_CHUNK)
         {
-            XKCP::KangarooTwelve(state, (unsigned int)size, out, K12SDC_CV);   // single node: no tree
+            stream.update(state, size);   // single node: no tree
+            stream.finalize(out);
             return;
         }
 
-        XKCP::KangarooTwelve_Instance kt;
-        XKCP::KangarooTwelve_Initialize(&kt, K12SDC_SEC, K12SDC_CV);
-
-        // chunk 0 -> finalNode raw, then the 0x03 first-node framing (KangarooTwelve_Update path).
-        XKCP::TurboSHAKE_Absorb(&kt.finalNode, state, K12SDC_CHUNK);
-        const unsigned char pad03 = 0x03;
-        kt.queueAbsorbedLen = 0;
-        kt.blockNumber = 1;
-        XKCP::TurboSHAKE_Absorb(&kt.finalNode, &pad03, 1);
-        kt.finalNode.byteIOIndex = (kt.finalNode.byteIOIndex + 7) & ~7;   // zero-pad to 64 bits
-
+        stream.update(state, K12SDC_CHUNK);
         unsigned long long off = K12SDC_CHUNK, k = 1;
-        while (off < size)
+        for (; off + K12SDC_CHUNK <= size; off += K12SDC_CHUNK, ++k)
         {
-            unsigned int len = (size - off < K12SDC_CHUNK) ? (unsigned int)(size - off) : K12SDC_CHUNK;
-            if (len == K12SDC_CHUNK)
+            unsigned char* cv = cvCache + k * K12SDC_CV;
+            if (chunkDirty[k])
             {
-                unsigned char inter[maxCapacityInBytes];
-                ++kt.blockNumber;
-                if (chunkDirty[k])
-                {
-                    XKCP::TurboSHAKE_Initialize(&kt.queueNode, K12SDC_SEC);
-                    XKCP::TurboSHAKE_Absorb(&kt.queueNode, state + off, K12SDC_CHUNK);
-                    XKCP::TurboSHAKE_AbsorbDomainSeparationByte(&kt.queueNode, K12_suffixLeaf);
-                    XKCP::TurboSHAKE_Squeeze(&kt.queueNode, inter, K12SDC_CV);
-                    copyMem(cvCache + k * K12SDC_CV, inter, K12SDC_CV);
-                }
-                else
-                {
-                    copyMem(inter, cvCache + k * K12SDC_CV, K12SDC_CV);
-                }
-                XKCP::TurboSHAKE_Absorb(&kt.finalNode, inter, K12SDC_CV);
+                KangarooTwelveLeaf(state + off, cv);
             }
-            else
-            {
-                // partial last chunk: raw into queueNode, no CV (KangarooTwelve_Final finalizes it)
-                XKCP::TurboSHAKE_Initialize(&kt.queueNode, K12SDC_SEC);
-                XKCP::TurboSHAKE_Absorb(&kt.queueNode, state + off, len);
-                kt.queueAbsorbedLen = len;
-            }
-            off += len;
-            ++k;
+            stream.absorbChainingValue(cv);
         }
-        XKCP::KangarooTwelve_Final(&kt, out, nullptr, 0);   // right_encode(0) leaf + right_encode(n)||0xFFFF + suffix
+        stream.update(state + off, size - off);
+        stream.finalize(out);
     }
 
 #if defined(__linux__)

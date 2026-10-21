@@ -2,13 +2,14 @@
 
 #define NO_UEFI
 
+#include <gtest/gtest.h>
+
 #include "platform/msvc_polyfill.h"
 #include "platform/file_io.h"
 #include "platform/m256.h"
 #define CONTRACT_STATE_PAGER_CONTRACT_COUNT 1
 #include <extensions/contract_state_pager.h>
 #undef CONTRACT_STATE_PAGER_CONTRACT_COUNT
-#include <gtest/gtest.h>
 
 #include <array>
 #include <atomic>
@@ -87,7 +88,7 @@ private:
 std::array<unsigned char, 32> canonicalHash(const unsigned char* state, size_t size)
 {
     std::array<unsigned char, 32> hash{};
-    XKCP::KangarooTwelve(state, size, hash.data(), hash.size());
+    KangarooTwelve(state, (unsigned int)size, hash.data(), (unsigned int)hash.size());
     return hash;
 }
 
