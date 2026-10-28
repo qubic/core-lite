@@ -35,6 +35,7 @@ static HostServices hostServices =
     .nextId = &nextId,
     .prevId = &previousId,
     .isContractId = &isContractId,
+    .isFrozenIdentity = &isFrozenIdentity,
     .arbitrator = &arbitrator,
     .computor = &computor,
     .day = &day,

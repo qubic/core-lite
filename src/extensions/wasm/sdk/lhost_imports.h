@@ -51,6 +51,7 @@ LH_IMPORT(queryFeeReserve) long long lh_queryFeeReserve(unsigned int contractInd
 LH_IMPORT(nextId)         void  lh_nextId(const void* id32, void* out32);
 LH_IMPORT(prevId)         void  lh_prevId(const void* id32, void* out32);
 LH_IMPORT(isContractId)   unsigned int lh_isContractId(const void* id32);
+LH_IMPORT(isFrozenIdentity) unsigned int lh_isFrozenIdentity(const void* id32);
 LH_IMPORT(arbitrator)     void  lh_arbitrator(void* out32);
 LH_IMPORT(computor)       void  lh_computor(unsigned int index, void* out32);
 LH_IMPORT(day)            unsigned int lh_day();

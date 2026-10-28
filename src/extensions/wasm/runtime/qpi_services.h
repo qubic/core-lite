@@ -279,6 +279,11 @@ static unsigned char isContractId(const void* context, const void* id)
     return (unsigned char)functionContext(context)->isContractId(*(const m256i*)id);
 }
 
+static unsigned char isFrozenIdentity(const void* context, const void* id)
+{
+    return (unsigned char)functionContext(context)->isFrozenIdentity(*(const m256i*)id);
+}
+
 static void arbitrator(const void* context, void* output)
 {
     *(m256i*)output = functionContext(context)->arbitrator();

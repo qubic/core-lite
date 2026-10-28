@@ -84,7 +84,8 @@ class NodeClient:
     async def request_save_snapshot(self) -> bool:
         session = await self._get_session()
         async with session.get(
-            f"{self._base_url}/request-save-snapshot"
+            f"{self._base_url}/request-save-snapshot",
+            params=self._passcode_params(),
         ) as resp:
             resp.raise_for_status()
             data = await resp.json()

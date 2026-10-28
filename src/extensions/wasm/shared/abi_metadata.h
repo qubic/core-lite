@@ -1,7 +1,7 @@
 #pragma once
 
 // Canonical rows shared by WAMR registration and SDK metadata generation.
-#define WASM_ABI_VERSION 7u
+#define WASM_ABI_VERSION 8u
 
 // G/H selects generated or handwritten adapters; Q/I selects QPI-bound or infrastructure calls.
 
@@ -42,6 +42,7 @@
     GQ("nextId",                              nextId,                               "(ii)")      \
     GQ("prevId",                              prevId,                               "(ii)")      \
     GQ("isContractId",                        isContractId,                         "(i)i")      \
+    GQ("isFrozenIdentity",                    isFrozenIdentity,                     "(i)i")      \
     GQ("arbitrator",                          arbitrator,                           "(i)")       \
     GQ("computor",                            computor,                             "(ii)")      \
     GQ("day",                                 day,                                  "()i")       \

@@ -86,6 +86,11 @@ QPI::bit QPI::QpiContextFunctionCall::isContractId(const QPI::id& id) const
     return (QPI::bit)lh_isContractId(&id);
 }
 
+QPI::bit QPI::QpiContextFunctionCall::isFrozenIdentity(const QPI::id& id) const
+{
+    return (QPI::bit)lh_isFrozenIdentity(&id);
+}
+
 QPI::id QPI::QpiContextFunctionCall::arbitrator() const
 {
     m256i id;

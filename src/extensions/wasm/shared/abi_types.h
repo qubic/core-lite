@@ -72,6 +72,7 @@ struct HostServices
     void (*nextId)(const void* ctx, const void* id32, void* out32);
     void (*prevId)(const void* ctx, const void* id32, void* out32);
     unsigned char (*isContractId)(const void* ctx, const void* id32);
+    unsigned char (*isFrozenIdentity)(const void* ctx, const void* id32);
     void (*arbitrator)(const void* ctx, void* out32);
     void (*computor)(const void* ctx, unsigned short index, void* out32);
 

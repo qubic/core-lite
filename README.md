@@ -244,6 +244,7 @@ Delete the **system** file at your current working folder, it may make your node
 | **Lite Node Operator Alias** | `--operator-alias` | `--operator-alias "MyNode"` | A human-readable name for the lite node operator. |
 | **Lite Node Operator ID (Seed)** | `--operator-seed` | `--operator-seed aaa...aaa` | Used to identify lite node operators in the network (utilized by the **Network Guardian** project). |
 | **Logging Reader Passcode** | `--reader-passcode` | `--reader-passcode 1-2-3-4` | The passcode required to access or read node logs. |
+| **HTTP Admin Passcode** | `--http-passcode` | `--http-passcode 1-2-3-4` | The passcode required for admin HTTP routes (shutdown, snapshot, file download). Admin routes are disabled when unset. |
 
 ## Supporting Platform
 

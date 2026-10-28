@@ -19,10 +19,42 @@
 
 namespace rl
 {
-// Originating client IP, honoring proxy headers (CF-Connecting-IP, X-Real-IP, first X-Forwarded-For,
-// else peer addr). Spoofable -> diagnostics/metering only, never auth.
+inline bool envBool(const char* name, bool defaultVal)
+{
+    const char* s = std::getenv(name);
+    if (!s || !*s) return defaultVal;
+    std::string v(s);
+    return !(v == "0" || v == "false" || v == "FALSE" || v == "no");
+}
+
+// Loopback / RFC1918 (incl. Docker bridge) pass unmetered and may set proxy headers.
+inline bool isAllowlistedIp(const std::string& ip)
+{
+    if (ip.empty()) return true;
+    if (ip == "127.0.0.1" || ip == "::1") return true;
+    if (ip.rfind("10.", 0) == 0) return true;
+    if (ip.rfind("192.168.", 0) == 0) return true;
+    if (ip.rfind("172.", 0) == 0)
+    {
+        size_t dot = ip.find('.', 4);
+        if (dot != std::string::npos)
+        {
+            int n = std::atoi(ip.substr(4, dot - 4).c_str());
+            if (n >= 16 && n <= 31) return true;
+        }
+    }
+    return false;
+}
+
+// Originating client IP for diagnostics/metering, never auth. Proxy headers (CF-Connecting-IP,
+// X-Real-IP, first X-Forwarded-For) are forgeable, so only a local reverse proxy (allowlisted peer)
+// may set them; QUBIC_HTTP_TRUST_PROXY_HEADERS=1 honors them from any peer for nodes behind a
+// public-IP proxy or CDN whose ingress is firewalled to that proxy.
 inline std::string extractClientIp(const drogon::HttpRequestPtr& req)
 {
+    static const bool trustAnyPeer = envBool("QUBIC_HTTP_TRUST_PROXY_HEADERS", false);
+    std::string peerIp = req->peerAddr().toIp();
+    if (!trustAnyPeer && !isAllowlistedIp(peerIp)) return peerIp;
     auto trim = [](std::string s) {
         size_t a = s.find_first_not_of(" \t");
         size_t b = s.find_last_not_of(" \t");
@@ -38,7 +70,7 @@ inline std::string extractClientIp(const drogon::HttpRequestPtr& req)
         auto comma = xff.find(',');
         return trim(comma == std::string::npos ? xff : xff.substr(0, comma));
     }
-    return req->peerAddr().toIp();
+    return peerIp;
 }
 
 #ifndef NO_HTTP_RATE_LIMIT
@@ -69,14 +101,6 @@ inline double envDouble(const char* name, double defaultVal)
     double v = std::strtod(s, &end);
     return (end == s) ? defaultVal : v;
 }
-inline bool envBool(const char* name, bool defaultVal)
-{
-    const char* s = std::getenv(name);
-    if (!s || !*s) return defaultVal;
-    std::string v(s);
-    return !(v == "0" || v == "false" || v == "FALSE" || v == "no");
-}
-
 inline bool rateLimitEnabled()
 {
     static const bool v = envBool("QUBIC_HTTP_RATE_LIMIT_ENABLED", true);
@@ -91,25 +115,6 @@ inline double rateLimitBurst()
 {
     static const double v = std::max(1.0, envDouble("QUBIC_HTTP_RATE_LIMIT_BURST", 40.0));
     return v;
-}
-
-// Loopback / RFC1918 (incl. Docker bridge) pass unmetered.
-inline bool isAllowlistedIp(const std::string& ip)
-{
-    if (ip.empty()) return true;
-    if (ip == "127.0.0.1" || ip == "::1") return true;
-    if (ip.rfind("10.", 0) == 0) return true;
-    if (ip.rfind("192.168.", 0) == 0) return true;
-    if (ip.rfind("172.", 0) == 0)
-    {
-        size_t dot = ip.find('.', 4);
-        if (dot != std::string::npos)
-        {
-            int n = std::atoi(ip.substr(4, dot - 4).c_str());
-            if (n >= 16 && n <= 31) return true;
-        }
-    }
-    return false;
 }
 
 // True if allowed, false if it must be 429'd.

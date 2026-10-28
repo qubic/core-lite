@@ -30,10 +30,21 @@ static std::shared_ptr<Json::Value> rpcJsonBody(const std::string& body)
 
 // Was in http.h; the RPC routes reference it for passcode-gated endpoints.
 extern unsigned long long httpPasscodes[4];
+void logColorToScreen(std::string type, std::string msg);
 
-// ---- auth: passcode = p0-p1-p2-p3 ----
+// ---- auth: passcode = p0-p1-p2-p3; unset (all zero) disables the gated routes ----
 static bool rpcPasscodeOk(const RpcReq& req)
 {
+    if (!httpPasscodes[0] && !httpPasscodes[1] && !httpPasscodes[2] && !httpPasscodes[3])
+    {
+        static bool warned = false;
+        if (!warned)
+        {
+            warned = true;
+            logColorToScreen("WARN", "Admin HTTP routes disabled: start with --http-passcode to enable them");
+        }
+        return false;
+    }
     std::string correct = std::to_string(httpPasscodes[0]) + "-" +
                           std::to_string(httpPasscodes[1]) + "-" +
                           std::to_string(httpPasscodes[2]) + "-" +
@@ -163,7 +174,7 @@ RPC_ROUTE("GET", "/solution-publish-ticks")
 
 RPC_ROUTE("GET", "/request-save-snapshot")
 {
-    (void)req;
+    if (!rpcPasscodeOk(req)) return rpcUnauthorized();
     requestPersistingNodeState = 1;
     Json::Value json;
     json["status"] = "ok";
@@ -193,6 +204,7 @@ RPC_ROUTE("GET", "/shutdown")
 
 RPC_ROUTE("GET", "/set-max-inbound")
 {
+    if (!rpcPasscodeOk(req)) return rpcUnauthorized();
     int n = std::stoi(req.getParameter("n"));
     if (n < 0) n = 0;
     if (n > NUMBER_OF_INCOMING_CONNECTIONS) n = NUMBER_OF_INCOMING_CONNECTIONS;
@@ -205,6 +217,7 @@ RPC_ROUTE("GET", "/set-max-inbound")
 
 RPC_ROUTE("GET", "/spam")
 {
+    if (!rpcPasscodeOk(req)) return rpcUnauthorized();
     char enable = 0;
     std::string enableStr = req.getParameter("enable");
     bool withRpc = req.getParameter("withRpc") == "true" || req.getParameter("withRpc") == "1";
@@ -221,6 +234,7 @@ RPC_ROUTE("GET", "/spam")
 
 RPC_ROUTE("GET", "/set-operator-seed")
 {
+    if (!rpcPasscodeOk(req)) return rpcUnauthorized();
     std::string seed = req.getParameter("seed");
     if (seed.length() != 55)
     {

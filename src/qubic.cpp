@@ -86,6 +86,8 @@
 #define system qsystem
 #endif
 
+// #define NO_QPUMP
+
 // #define INCLUDE_CONTRACT_TEST_EXAMPLES
 
 
@@ -3436,6 +3438,7 @@ static void contractProcessor(void*, unsigned long long processorNumber)
                 }
 
                 setMem(contractStates[executedContractIndex], contractDescriptions[executedContractIndex].stateSize, 0);
+                __markContractStateDirty(executedContractIndex);
                 QpiContextSystemProcedureCall qpiContext(executedContractIndex, INITIALIZE);
                 qpiContext.call();
             }
@@ -4806,6 +4809,7 @@ static void transferFrozenAssetsToEscrow()
 static void processTick(unsigned long long processorNumber)
 {
     PROFILE_SCOPE();
+    updateNumberOfTickTransactions();
     TickBench::Scope _btTotal(TickBench::TICK_TOTAL);
 
     if (gTestSolutionThreshold >= 0 && system.epoch < MAX_NUMBER_EPOCH)
@@ -6768,7 +6772,6 @@ static bool loadAllNodeStates()
         logToConsole(L"Failed to load system");
         return false;
     }
-    updateNumberOfTickTransactions();
 
     setMem(assetChangeFlags, sizeof(assetChangeFlags), 0);
     setMem(spectrumChangeFlags, sizeof(spectrumChangeFlags), 0);
@@ -8553,7 +8556,6 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                                 logger.updateTick(system.tick);
                                 system.tick++;
 
-                                updateNumberOfTickTransactions();
                                 pendingTxsPool.incrementFirstStoredTick();
 
                                 if (system.tick % NUMBER_OF_COMPUTORS == 0)
@@ -9304,10 +9306,6 @@ static bool initialize()
         lastExpectedTickTransactionDigest = m256i::zero();
 
         beginEpoch();
-
-        // needs to be called after ts.beginEpoch() because it looks up tickIndex, which requires to setup begin of epoch in ts
-        logToConsole(L"updateNumberOfTickTransactions...");
-        updateNumberOfTickTransactions();
 
         // contract functions and procedures need to be initialized before loading to enable the use of contract MIGRATE procedures
         initializeContracts();
