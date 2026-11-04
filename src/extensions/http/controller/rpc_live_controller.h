@@ -979,8 +979,9 @@ RPC_ROUTE("GET", "/live/v1/tx-status/:tick/:tx")
     Json::Value result;
     const std::string transactionId = req.getParameter("tx");
     const unsigned int tick = (unsigned int)strtoul(req.getParameter("tick").c_str(), nullptr, 10);
+    const unsigned int currentTick = system.tick;
     result["tick"] = tick;
-    result["currentTick"] = system.tick;
+    result["currentTick"] = currentTick;
     result["txId"] = transactionId;
 
     std::string uppercaseId = transactionId;
@@ -1007,6 +1008,14 @@ RPC_ROUTE("GET", "/live/v1/tx-status/:tick/:tx")
         inRange = true;
     }
 
+    // a tick outside the retained window has no verdict; found:false there would read as "not included"
+    if (!inRange)
+    {
+        result["code"] = 404;
+        result["message"] = "tick " + std::to_string(tick) + " is no longer held";
+        return jsonResp(result, 404);
+    }
+
     bool found = false;
     bool moneyFlew = false;
     if (inRange)
@@ -1028,7 +1037,7 @@ RPC_ROUTE("GET", "/live/v1/tx-status/:tick/:tx")
     }
     result["found"] = found;
     result["moneyFlew"] = moneyFlew;
-    result["processed"] = system.tick > tick;
+    result["processed"] = currentTick > tick;
     return jsonResp(result);
 }
 #endif // ADDON_TX_STATUS_REQUEST
