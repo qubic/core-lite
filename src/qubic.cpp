@@ -86,8 +86,6 @@
 #define system qsystem
 #endif
 
-// #define NO_QPUMP
-
 // #define INCLUDE_CONTRACT_TEST_EXAMPLES
 
 

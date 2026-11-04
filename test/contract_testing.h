@@ -66,6 +66,19 @@ public:
         }
     }
 
+    // Load a contract state file, which must match the current state size exactly.
+    bool loadContractState(unsigned int contractIndex, const CHAR16* filename)
+    {
+        const unsigned long long stateSize = contractDescriptions[contractIndex].stateSize;
+        const long long fileSize = getFileSize(const_cast<CHAR16*>(filename));
+        if (fileSize < 0 || (unsigned long long)fileSize != stateSize)
+        {
+            std::cout << "State file has " << fileSize << " bytes, expected " << stateSize << std::endl;
+            return false;
+        }
+        return load(filename, stateSize, contractStates[contractIndex]) == stateSize;
+    }
+
     void initEmptySpectrum()
     {
         initSpectrum();
