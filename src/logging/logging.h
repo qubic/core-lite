@@ -389,9 +389,15 @@ public:
     };
 
 public:
-    inline static VirtualMemory<char, TEXT_BUF_AS_NUMBER, TEXT_LOGS_AS_NUMBER, LOG_BUFFER_PAGE_SIZE, VM_NUM_CACHE_PAGE> logBuffer;
-    inline static VirtualMemory<BlobInfo, TEXT_PMAP_AS_NUMBER, TEXT_LOGS_AS_NUMBER, PMAP_LOG_PAGE_SIZE, VM_NUM_CACHE_PAGE> mapLogIdToBufferIndex;
-    inline static VirtualMemory<TickBlobInfo, TEXT_IMAP_AS_NUMBER, TEXT_LOGS_AS_NUMBER, IMAP_LOG_PAGE_SIZE, VM_NUM_CACHE_PAGE> mapTxToLogId;
+    // Log readers (e.g. indexers far behind) read old ticks at scattered positions; with only
+    // VM_NUM_CACHE_PAGE pages per index they evict each other and every read reloads a whole page
+    // (150-240 MB on mainnet) from disk. Each extra cache page costs one page of RAM per index.
+#ifndef LOG_VM_NUM_CACHE_PAGE
+#define LOG_VM_NUM_CACHE_PAGE 16
+#endif
+    inline static VirtualMemory<char, TEXT_BUF_AS_NUMBER, TEXT_LOGS_AS_NUMBER, LOG_BUFFER_PAGE_SIZE, LOG_VM_NUM_CACHE_PAGE> logBuffer;
+    inline static VirtualMemory<BlobInfo, TEXT_PMAP_AS_NUMBER, TEXT_LOGS_AS_NUMBER, PMAP_LOG_PAGE_SIZE, LOG_VM_NUM_CACHE_PAGE> mapLogIdToBufferIndex;
+    inline static VirtualMemory<TickBlobInfo, TEXT_IMAP_AS_NUMBER, TEXT_LOGS_AS_NUMBER, IMAP_LOG_PAGE_SIZE, LOG_VM_NUM_CACHE_PAGE> mapTxToLogId;
     inline static TickBlobInfo currentTickTxToId;
     inline static char responseBuffers[MAX_NUMBER_OF_PROCESSORS][RequestResponseHeader::max_size];
 
