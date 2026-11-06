@@ -113,6 +113,11 @@ namespace tickFork
     // Checkpoint-and-replay: k ticks share one fork (amortizes the O(RSS) fork). The checkpoint child
     // stays alive across the window; match keeps it, mismatch rewinds+replays strict, staleness commits.
     inline unsigned int gForkWindowK = 64;
+    // Window while far behind (catch-up receive filter armed): each checkpoint parks every request
+    // processor for a fork and a shadow commit, which at catch-up speed comes every few seconds.
+    // Set when a checkpoint is established, so parent and child always agree on the window.
+    inline constexpr unsigned int gForkWindowKInSync = 64;
+    inline constexpr unsigned int gForkWindowKCatchup = 512;
     inline unsigned int gCheckpointTick = 0;
     // Deadline to hand work to the BSP and quiesce fork writers before a fork / shadow commit.
     inline constexpr int gForkQuiesceTimeoutMs = 5'000;
@@ -284,12 +289,14 @@ namespace tickFork
     // writers, drains VM IO, arms the shadow, and forks.
     inline void establishCheckpoint()
     {
+        gForkWindowK = CatchupRxFilter::gDropAboveTick.load(std::memory_order_relaxed) ? gForkWindowKCatchup : gForkWindowKInSync;
         if (gForkBench)
         {
             gForkWindowStartNs = tickForkNowNs();
             gForkRssBeforeKb = tickForkRssKb();
         }
-        tickForkLog("checkpoint -> request BSP fork");
+        tickForkLog(gForkWindowK == gForkWindowKCatchup ? "checkpoint -> request BSP fork (catch-up window 512)"
+                                                        : "checkpoint -> request BSP fork");
         setWinState(WindowState::Checkpointing);
         ForkStats::onForkRequested();
 
