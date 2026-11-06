@@ -11475,6 +11475,22 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     logToConsole(L"Refreshed connection...");
                 }
 
+#if USE_FUTURE_TICK_PREFETCH
+                {
+                    // Arm the catch-up receive filter only while far behind (AUX); off in sync.
+                    static unsigned long long rxFilterCheckTick = 0;
+                    if (curTimeTick - rxFilterCheckTick >= 100 * frequency / 1000)
+                    {
+                        rxFilterCheckTick = curTimeTick;
+                        const unsigned int networkTipTick = opt_future_tick_prefetch::estimateNetworkTip();
+                        const bool farBehind = !isMainMode() && !epochTransitionState
+                            && networkTipTick > system.tick + 2 * CatchupRxFilter::KEEP_AHEAD;
+                        CatchupRxFilter::gDropAboveTick.store(farBehind ? system.tick + CatchupRxFilter::KEEP_AHEAD : 0,
+                                                              std::memory_order_relaxed);
+                    }
+                }
+#endif
+
                 if (curTimeTick - tickRequestingTick >= TICK_REQUESTING_PERIOD * frequency / 1000
                     && ts.tickInCurrentEpochStorage(system.tick + 1)
                     && !epochTransitionState)
