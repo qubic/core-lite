@@ -408,7 +408,8 @@ public:
     inline static VirtualMemory<BlobInfo, TEXT_PMAP_AS_NUMBER, TEXT_LOGS_AS_NUMBER, PMAP_LOG_PAGE_SIZE, LOG_VM_NUM_CACHE_PAGE> mapLogIdToBufferIndex;
     inline static VirtualMemory<TickBlobInfo, TEXT_IMAP_AS_NUMBER, TEXT_LOGS_AS_NUMBER, IMAP_LOG_PAGE_SIZE, LOG_VM_NUM_CACHE_PAGE> mapTxToLogId;
     inline static TickBlobInfo currentTickTxToId;
-    inline static char responseBuffers[MAX_NUMBER_OF_PROCESSORS][RequestResponseHeader::max_size];
+    // allocated at init: a zero-filled inline array is a weak definition, and mach-o writes weak data into the file
+    inline static char (*responseBuffers)[RequestResponseHeader::max_size];
 
 #if LOG_STATE_DIGEST
     // Digests of log data:
@@ -692,6 +693,11 @@ public:
     static bool initLogging()
     {
 #if ENABLED_LOGGING
+        if (!allocPoolWithErrorLog(L"responseBuffers", MAX_NUMBER_OF_PROCESSORS * sizeof(*responseBuffers), (void**)&responseBuffers, __LINE__, true, true))
+        {
+            return false;
+        }
+
         if (!logBuf.init())
         {
             return false;
@@ -712,6 +718,8 @@ public:
 #if ENABLED_LOGGING
         logBuf.deinit();
         tx.deinit();
+        freePool(responseBuffers);
+        responseBuffers = nullptr;
 #endif
     }
 
