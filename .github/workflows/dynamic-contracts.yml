@@ -456,6 +456,10 @@ jobs:
         shell: bash
         run: |
           test "$(lipo -archs "$NODE_BIN")" = "$MATRIX_ARCH"
+          if [ "$(stat -f%z "$NODE_BIN")" -gt 104857600 ]; then
+            echo "::error::macOS node is over 100 MB: zero-filled statics are being written into the file"
+            exit 1
+          fi
           MIN_OS=$(otool -l "$NODE_BIN" | awk '
             $1 == "cmd" && ($2 == "LC_BUILD_VERSION" || $2 == "LC_VERSION_MIN_MACOSX") { found = 1 }
             found && ($1 == "minos" || $1 == "version") { print $2; exit }
