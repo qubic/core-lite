@@ -1674,6 +1674,11 @@ static void processBroadcastTick(Peer* peer, RequestResponseHeader* header)
                 enqueueResponse(NULL, header);
             }
 
+            // Catching up: far-future votes are relayed above, but kept out of tick storage.
+            // They are requested again when the node gets close to those ticks.
+            if (CatchupRxFilter::relayOnly(request->tick.tick))
+                return;
+
             ts.ticks.acquireLock(request->tick.computorIndex);
 
             // Find element in tick storage and check if contains data (epoch is set to 0 on init)
