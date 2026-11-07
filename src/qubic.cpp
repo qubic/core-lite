@@ -1769,6 +1769,15 @@ static void processBroadcastFutureTickData(Peer* peer, RequestResponseHeader* he
                     enqueueResponse(NULL, header);
                 }
 
+                // Catching up: far-future tick data is relayed above, but kept out of tick data storage.
+                // It is requested again (and checked and stored as usual) when the node gets close to it.
+                // It still updates our estimate of the network tip, which arms the catch-up filter.
+                if (CatchupRxFilter::relayOnly(request->tickData.tick))
+                {
+                    peer->peerReportedTick = max(peer->peerReportedTick, request->tickData.tick);
+                    return;
+                }
+
 #if !defined(NDEBUG) && 1
                 unsigned int txCount = 0;
                 for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
