@@ -11093,7 +11093,9 @@ static void bspForkPoint()
         quiescence.abandonInChild();
         AntWalker::closeInheritedSocket();
         close(tickFork::gPipe[1]);
-        const auto childCommand = tickForkControl::readChildCommand(tickFork::gPipe[0], (unsigned)system.tick + tickFork::gForkWindowK);
+        const unsigned int checkpointTick = (unsigned)system.tick;
+        const auto childCommand = tickForkControl::readChildCommandWithCrashTarget(tickFork::gPipe[0],
+            [checkpointTick]() { return tickFork::crashReplayTargetTick(checkpointTick); });
         if (childCommand.action == tickForkControl::ChildAction::Retire)
         {
             close(tickFork::gPipe[0]);

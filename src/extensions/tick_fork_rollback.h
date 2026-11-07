@@ -17,6 +17,9 @@
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <new>
+#include <sys/mman.h>
+#include "platform/memory_headroom.h"
 #include "extensions/tick_fork_control.h"
 
 // Fork-path diagnostics: fprintf/stderr is fork-safe (no log-subsystem locks/buffers).
@@ -117,8 +120,48 @@ namespace tickFork
     // processor for a fork and a shadow commit, which at catch-up speed comes every few seconds.
     // Set when a checkpoint is established, so parent and child always agree on the window.
     inline constexpr unsigned int gForkWindowKInSync = 64;
-    inline constexpr unsigned int gForkWindowKCatchup = 512;
+    inline constexpr unsigned int gForkWindowKCatchup = 256;
     inline unsigned int gCheckpointTick = 0;
+    // Every page the parent writes during a window is copied for the checkpoint child, so a long
+    // window can exhaust RAM on smaller machines. Below this much available memory, the window is
+    // closed (committed) early instead of waiting for gForkWindowK ticks.
+    inline constexpr long long gForkWindowMinFreeBytes = 6LL << 30;
+
+    // Last tick the parent started, in a page shared with the checkpoint child. If the parent dies
+    // without a verdict (e.g. OOM-killed), the child replays strict only up to that tick instead of
+    // the whole window.
+    inline std::atomic<unsigned int>* gParentProgressTick = nullptr;
+
+    inline void ensureParentProgressPage()
+    {
+        if (gParentProgressTick)
+            return;
+        void* page = mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        if (page != MAP_FAILED)
+            gParentProgressTick = new (page) std::atomic<unsigned int>(0);
+    }
+
+    inline void noteParentProgress(unsigned int tick)
+    {
+        if (gParentProgressTick)
+            gParentProgressTick->store(tick, std::memory_order_relaxed);
+    }
+
+    // In the checkpoint child after the parent died: last tick to replay strict.
+    inline unsigned int crashReplayTargetTick(unsigned int checkpointTick)
+    {
+        const unsigned int windowEnd = checkpointTick + gForkWindowK;
+        const unsigned int parentTick = gParentProgressTick ? gParentProgressTick->load(std::memory_order_relaxed) : 0;
+        if (parentTick >= checkpointTick && parentTick < windowEnd)
+            return parentTick;
+        return windowEnd;
+    }
+
+    inline bool memoryLowForWindow()
+    {
+        const long long availableBytes = availableMemoryBytes();
+        return availableBytes >= 0 && availableBytes < gForkWindowMinFreeBytes;
+    }
     // Deadline to hand work to the BSP and quiesce fork writers before a fork / shadow commit.
     inline constexpr int gForkQuiesceTimeoutMs = 5'000;
 
@@ -295,8 +338,10 @@ namespace tickFork
             gForkWindowStartNs = tickForkNowNs();
             gForkRssBeforeKb = tickForkRssKb();
         }
-        tickForkLog(gForkWindowK == gForkWindowKCatchup ? "checkpoint -> request BSP fork (catch-up window 512)"
+        tickForkLog(gForkWindowK == gForkWindowKCatchup ? "checkpoint -> request BSP fork (catch-up window 256)"
                                                         : "checkpoint -> request BSP fork");
+        ensureParentProgressPage();
+        noteParentProgress((unsigned)system.tick);
         setWinState(WindowState::Checkpointing);
         ForkStats::onForkRequested();
 
@@ -458,7 +503,12 @@ namespace tickFork
         case WindowState::Live:
             if ((unsigned)system.tick - gCheckpointTick < gForkWindowK)
             {
-                return;
+                if (!memoryLowForWindow())
+                {
+                    noteParentProgress((unsigned)system.tick);
+                    return;
+                }
+                tickForkLog("low available memory -> close window early");
             }
             retireCheckpoint();
             if (gForkForceFork || tickHasSolution(system.tick))
