@@ -173,7 +173,7 @@ jobs:
           else
             echo "MACOS_DEPLOYMENT_TARGET=10.15" >> "$GITHUB_ENV"
           fi
-          echo "LIBFFI_VERSION=3.4.6" >> "$GITHUB_ENV"
+          echo "LIBFFI_VERSION=3.4.8" >> "$GITHUB_ENV"
           echo "LIBFFI_PREFIX=$RUNNER_TEMP/libffi-prefix" >> "$GITHUB_ENV"
         env:
           MATRIX_KEY: ${{ matrix.key }}
