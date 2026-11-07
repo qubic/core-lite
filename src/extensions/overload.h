@@ -667,6 +667,8 @@ struct Overload {
         SOCKET socket = INVALID_SOCKET;
         std::atomic<bool> stop{false};
     };
+    // recvWorkerLoop poll slice: bounds the stop re-check after DestroyChild.
+    static constexpr int RECV_POLL_SLICE_MS = 10;
 
     struct TcpData {
         EFI_TCP4_CONFIG_DATA configData;
@@ -1668,7 +1670,35 @@ struct Overload {
             // BUFFER_SIZE overruns receiveBuffer when it holds a partial message, clobbering the
             // adjacent peer's buffer (parses as malformed -> force-forgotten).
             const unsigned int maxReceiveSize = (unsigned int)token->Packet.RxData->FragmentTable[0].FragmentLength;
-            auto receivedBytes = recv(io->socket, (char*)token->Packet.RxData->FragmentTable[0].FragmentBuffer, maxReceiveSize, MSG_DONTWAIT);
+            char* dst = (char*)token->Packet.RxData->FragmentTable[0].FragmentBuffer;
+
+            // Wait for readability instead of completing on EAGAIN (that made main re-arm every pass).
+            // Woken by data, FIN/RST, or the shutdown() in Configure(NULL); stop checked before each recv.
+            long long receivedBytes = SOCKET_ERROR;
+            for (;;)
+            {
+                if (io->stop.load(std::memory_order_acquire)) break;
+                receivedBytes = recv(io->socket, dst, maxReceiveSize, MSG_DONTWAIT);
+                if (receivedBytes >= 0) break;
+#ifdef _MSC_VER
+                if (WSAGetLastError() != WSAEWOULDBLOCK) break;
+#else
+                if (errno != EWOULDBLOCK && errno != EAGAIN) break;
+#endif
+                if (io->stop.load(std::memory_order_acquire)) break;
+#ifdef _MSC_VER
+                WSAPOLLFD pfd{};
+                pfd.fd = io->socket;
+                pfd.events = POLLIN;
+                WSAPoll(&pfd, 1, RECV_POLL_SLICE_MS);
+#else
+                pollfd pfd{};
+                pfd.fd = io->socket;
+                pfd.events = POLLIN;
+                poll(&pfd, 1, RECV_POLL_SLICE_MS);
+#endif
+            }
+
             EFI_STATUS finalStatus;
             unsigned int dataLen = 0;
             if (receivedBytes > 0)
@@ -1676,32 +1706,10 @@ struct Overload {
                 dataLen = (unsigned int)receivedBytes;
                 finalStatus = EFI_SUCCESS;
             }
-            else if (receivedBytes == 0)
-            {
-                finalStatus = EFI_ABORTED;
-            }
             else
             {
-#ifdef _MSC_VER
-                int err = WSAGetLastError();
-                if (err == WSAEWOULDBLOCK)
-                {
-                    finalStatus = EFI_SUCCESS;
-                }
-                else
-                {
-                    finalStatus = EFI_ABORTED;
-                }
-#else
-                if (errno == EWOULDBLOCK || errno == EAGAIN)
-                {
-                    finalStatus = EFI_SUCCESS;
-                }
-                else
-                {
-                    finalStatus = EFI_ABORTED;
-                }
-#endif
+                // 0 = peer closed, <0 = error; EAGAIN only exits the loop via stop (guarded below).
+                finalStatus = EFI_ABORTED;
             }
             // Stop (DestroyChild/reconfigure): abandon WITHOUT touching token — the slot may be re-armed.
             if (io->stop.load(std::memory_order_acquire)) continue;
