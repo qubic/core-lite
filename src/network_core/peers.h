@@ -16,6 +16,8 @@
 #include "network_messages/header.h"
 #include "network_messages/common_response.h"
 
+#include "optimizations/opt_catchup_rx_filter.h"
+
 #include "tcp4.h"
 #include "kangaroo_twelve.h"
 
@@ -1191,6 +1193,13 @@ static void processReceivedData(unsigned int i, unsigned int salt)
                         if (totalReceivedSize - readOffset < requestResponseHeader->size())
                         {
                             break;
+                        }
+
+                        // Catch-up: drop far-future votes before hashing and queueing them.
+                        if (CatchupRxFilter::shouldDrop(requestResponseHeader))
+                        {
+                            readOffset += requestResponseHeader->size();
+                            continue;
                         }
 
                         // Compute saltId of packet with K12 of payload and header (size + type temporarily
