@@ -216,7 +216,10 @@ namespace tickForkControl
         return writeSize == 1;
     }
 
-    inline ChildCommand readChildCommand(int pipeFd, unsigned int crashTargetTick)
+    // crashTargetTick() is evaluated only if the parent failed, after its pipe closed, so it can read
+    // how far the parent got.
+    template <typename CrashTarget>
+    inline ChildCommand readChildCommandWithCrashTarget(int pipeFd, CrashTarget crashTargetTick)
     {
         char tag = 0;
         unsigned int targetTick = 0;
@@ -232,11 +235,16 @@ namespace tickForkControl
         }
 
         // EOF, a short frame, or an unknown tag means the parent failed unexpectedly.
-        if (targetTick == 0)
-            targetTick = crashTargetTick;
         if (!waitForPipeEof(pipeFd))
             _exit(72);
+        if (targetTick == 0)
+            targetTick = crashTargetTick();
         return { ChildAction::Promote, targetTick };
+    }
+
+    inline ChildCommand readChildCommand(int pipeFd, unsigned int crashTargetTick)
+    {
+        return readChildCommandWithCrashTarget(pipeFd, [crashTargetTick]() { return crashTargetTick; });
     }
 }
 

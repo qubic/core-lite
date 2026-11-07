@@ -4,6 +4,7 @@
 #include "platform/concurrency.h"
 #include "platform/time.h"
 #include "platform/memory_util.h"
+#include "platform/memory_headroom.h"
 #include "platform/debugging.h"
 #include "platform/file_io.h"
 #include "extensions/disk_shadow.h"
@@ -234,20 +235,42 @@ protected:
 #endif
     }
 
-    // return the most outdated cache page
+    // Opt-in cache growth limit (setCacheGrowth): slots above cacheMinSlots are taken only while the
+    // machine has at least cacheGrowMinFreeBytes of available memory. 0 = no limit (default).
+    unsigned long long cacheMinSlots = numCachePage;
+    unsigned long long cacheGrowMinFreeBytes = 0;
+
+    // return the slot to fill: a free one if allowed, else the most outdated cache page
     int getMostOutdatedCachePage()
     {
         // i = 1 because 0 is used for current page
-        int min_index = 1;
+        int min_index = 0;
+        int free_index = 0;
         for (int i = 1; i <= numCachePage; i++)
         {
             if (lastAccessedTimestamp[i] == 0)
             {
-                return i;
+                if (!free_index)
+                {
+                    free_index = i;
+                }
+                continue;
             }
-            if ((lastAccessedTimestamp[i] < lastAccessedTimestamp[min_index]) || (lastAccessedTimestamp[i] == lastAccessedTimestamp[min_index] && cachePageId[i] < cachePageId[min_index]))
+            if (!min_index || (lastAccessedTimestamp[i] < lastAccessedTimestamp[min_index]) || (lastAccessedTimestamp[i] == lastAccessedTimestamp[min_index] && cachePageId[i] < cachePageId[min_index]))
             {
                 min_index = i;
+            }
+        }
+        if (free_index && (!min_index || !cacheGrowMinFreeBytes || (unsigned long long)free_index <= cacheMinSlots))
+        {
+            return free_index;
+        }
+        if (free_index)
+        {
+            const long long availableBytes = availableMemoryBytes();
+            if (availableBytes >= 0 && (unsigned long long)availableBytes >= cacheGrowMinFreeBytes)
+            {
+                return free_index;
             }
         }
         return min_index;
@@ -371,7 +394,15 @@ protected:
 
     void reset()
     {
-        setMem(currentPage, pageSize * (numCachePage + 1), 0);
+        if (cacheGrowMinFreeBytes)
+        {
+            // Hand the pool back instead of writing it, so cache slots cost RAM only once used.
+            zeroPool(currentPage, pageSize * (numCachePage + 1));
+        }
+        else
+        {
+            setMem(currentPage, pageSize * (numCachePage + 1), 0);
+        }
         setMem(cachePageId, sizeof(cachePageId), 0xff);
         setMem(lastAccessedTimestamp, sizeof(lastAccessedTimestamp), 0);
         cachePageId[0] = 0;
@@ -385,6 +416,14 @@ public:
     VirtualMemory()
     {
         memLock = 0;
+    }
+
+    // Call before init(). Keeps up to minSlots cache pages unconditionally and takes more only while
+    // the machine has growMinFreeBytes of available memory; unused slots cost no RAM.
+    void setCacheGrowth(unsigned long long minSlots, unsigned long long growMinFreeBytes)
+    {
+        cacheMinSlots = minSlots;
+        cacheGrowMinFreeBytes = growMinFreeBytes;
     }
 
     bool init()
