@@ -403,7 +403,12 @@ public:
 #ifndef LOG_VM_CACHE_GROW_MIN_FREE_GB
 #define LOG_VM_CACHE_GROW_MIN_FREE_GB 10
 #endif
+    // Below this much available memory, the pages above LOG_VM_MIN_CACHE_PAGE are given back.
+#ifndef LOG_VM_CACHE_SHRINK_BELOW_GB
+#define LOG_VM_CACHE_SHRINK_BELOW_GB 8
+#endif
     static constexpr unsigned long long logCacheGrowMinFreeBytes = (unsigned long long)LOG_VM_CACHE_GROW_MIN_FREE_GB << 30;
+    static constexpr long long logCacheShrinkBelowBytes = (long long)LOG_VM_CACHE_SHRINK_BELOW_GB << 30;
     inline static VirtualMemory<char, TEXT_BUF_AS_NUMBER, TEXT_LOGS_AS_NUMBER, LOG_BUFFER_PAGE_SIZE, LOG_VM_NUM_CACHE_PAGE> logBuffer;
     inline static VirtualMemory<BlobInfo, TEXT_PMAP_AS_NUMBER, TEXT_LOGS_AS_NUMBER, PMAP_LOG_PAGE_SIZE, LOG_VM_NUM_CACHE_PAGE> mapLogIdToBufferIndex;
     inline static VirtualMemory<TickBlobInfo, TEXT_IMAP_AS_NUMBER, TEXT_LOGS_AS_NUMBER, IMAP_LOG_PAGE_SIZE, LOG_VM_NUM_CACHE_PAGE> mapTxToLogId;
@@ -681,6 +686,23 @@ public:
         }
     } tx;
 #endif
+
+    // Called periodically from the main loop: below LOG_VM_CACHE_SHRINK_BELOW_GB of available
+    // memory, give back the log cache pages above LOG_VM_MIN_CACHE_PAGE. Returns pages released.
+    static unsigned int releaseLogCacheIfMemoryLow()
+    {
+#if ENABLED_LOGGING
+        const long long availableBytes = availableMemoryBytes();
+        if (availableBytes < 0 || availableBytes >= logCacheShrinkBelowBytes)
+        {
+            return 0;
+        }
+        return mapTxToLogId.tryReleaseCacheAboveMin() + mapLogIdToBufferIndex.tryReleaseCacheAboveMin()
+            + logBuffer.tryReleaseCacheAboveMin();
+#else
+        return 0;
+#endif
+    }
 
     static void registerNewTx(const unsigned int tick, const unsigned int txId)
     {
