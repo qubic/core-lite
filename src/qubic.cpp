@@ -1674,6 +1674,11 @@ static void processBroadcastTick(Peer* peer, RequestResponseHeader* header)
                 enqueueResponse(NULL, header);
             }
 
+            // Catching up: far-future votes are relayed above, but kept out of tick storage.
+            // They are requested again when the node gets close to those ticks.
+            if (CatchupRxFilter::relayOnly(request->tick.tick))
+                return;
+
             ts.ticks.acquireLock(request->tick.computorIndex);
 
             // Find element in tick storage and check if contains data (epoch is set to 0 on init)
@@ -11492,6 +11497,24 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     }
                 }
 #endif
+
+                {
+                    // Give log cache pages back when the machine runs low on memory (smaller lites).
+                    static unsigned long long logCacheMemoryCheckTick = 0;
+                    if (curTimeTick - logCacheMemoryCheckTick >= 5000 * frequency / 1000)
+                    {
+                        logCacheMemoryCheckTick = curTimeTick;
+                        const unsigned int releasedPages = qLogger::releaseLogCacheIfMemoryLow();
+                        if (releasedPages)
+                        {
+                            CHAR16 logCacheMessage[96];
+                            setText(logCacheMessage, L"Low available memory: released ");
+                            appendNumber(logCacheMessage, releasedPages, FALSE);
+                            appendText(logCacheMessage, L" log cache pages");
+                            logToConsole(logCacheMessage);
+                        }
+                    }
+                }
 
                 if (curTimeTick - tickRequestingTick >= TICK_REQUESTING_PERIOD * frequency / 1000
                     && ts.tickInCurrentEpochStorage(system.tick + 1)

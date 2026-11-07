@@ -1195,8 +1195,8 @@ static void processReceivedData(unsigned int i, unsigned int salt)
                             break;
                         }
 
-                        // Catch-up: drop far-future votes before hashing and queueing them.
-                        if (CatchupRxFilter::shouldDrop(requestResponseHeader))
+                        // Catch-up: under queue pressure, shed far-future votes before hashing and queueing them.
+                        if (CatchupRxFilter::shouldDrop(requestResponseHeader, (unsigned short)(requestQueueElementHead - requestQueueElementTail)))
                         {
                             readOffset += requestResponseHeader->size();
                             continue;
