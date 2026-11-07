@@ -27,7 +27,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             key: linux-arm64
             release_file: Qubic-linux-arm64
-          - runner: macos-14
+          - runner: macos-15
             key: darwin-arm64
             arch: arm64
             release_file: Qubic-darwin-arm64
