@@ -14,8 +14,11 @@
 // catch-up, not relaying them.
 // Votes within the window are always stored; farther ones are requested by the future-tick
 // prefetch when needed.
-// Future tick data is not filtered: it keeps Peer::peerReportedTick (our estimate of the network
-// tip, which arms this filter) up to date, and it is a tiny share of the traffic.
+// Future tick data is never dropped on receive: it keeps Peer::peerReportedTick (our estimate of the
+// network tip, which arms this filter) up to date, and it is a tiny share of the traffic. Above the
+// window it is checked and relayed as usual but not written to tick data storage (relayOnly): storing
+// it held tickDataLock for data needed only hours later. The future-tick prefetch (at most 20 ticks
+// ahead, inside the window) requests it again when the node gets close.
 // The main loop arms the filter (gDropAboveTick != 0) only while catching up; in sync it is off.
 
 #include <atomic>
@@ -43,7 +46,8 @@ static inline bool shouldDrop(const RequestResponseHeader* header, unsigned shor
         && ((const BroadcastTick*)(header + 1))->tick.tick > dropAbove;
 }
 
-// Called for a checked vote; true = relay it but do not store it (far ahead while catching up).
+// Called for checked data of a tick (vote, tick data); true = relay it but do not store it (far ahead
+// while catching up).
 static inline bool relayOnly(unsigned int tick)
 {
     const unsigned int dropAbove = gDropAboveTick.load(std::memory_order_relaxed);
