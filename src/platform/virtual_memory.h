@@ -426,9 +426,11 @@ public:
         cacheGrowMinFreeBytes = growMinFreeBytes;
     }
 
-    // With setCacheGrowth: give the RAM of the cache slots above minSlots back to the system, e.g.
-    // when the machine runs low on memory. Non-blocking: does nothing if a writer holds the lock
-    // (it may be loading a page from disk). Returns the number of slots released.
+    // With setCacheGrowth: give the RAM of one cache slot above minSlots (the least recently used)
+    // back to the system, e.g. when the machine runs low on memory. One slot per call: freeing them
+    // all at once could jump past the growth threshold and let the cache refill right away.
+    // Non-blocking: does nothing if a writer holds the lock (it may be loading a page from disk).
+    // Returns the number of slots released (0 or 1).
     unsigned int tryReleaseCacheAboveMin()
     {
         if (!cacheGrowMinFreeBytes || currentPage == NULL)
@@ -441,20 +443,23 @@ public:
         }
         while (memReaders)
             _mm_pause();
-        unsigned int released = 0;
+        unsigned long long stalest = 0;
         for (unsigned long long i = cacheMinSlots + 1; i <= numCachePage; i++)
         {
-            if (lastAccessedTimestamp[i] == 0)
+            if (lastAccessedTimestamp[i] != 0
+                && (!stalest || lastAccessedTimestamp[i] < lastAccessedTimestamp[stalest]))
             {
-                continue;
+                stalest = i;
             }
-            zeroPool(cache[i], pageSize);
-            lastAccessedTimestamp[i] = 0;
-            cachePageId[i] = 0xffffffffffffffffULL;
-            released++;
+        }
+        if (stalest)
+        {
+            zeroPool(cache[stalest], pageSize);
+            lastAccessedTimestamp[stalest] = 0;
+            cachePageId[stalest] = 0xffffffffffffffffULL;
         }
         RELEASE(memLock);
-        return released;
+        return stalest ? 1 : 0;
     }
 
     bool init()

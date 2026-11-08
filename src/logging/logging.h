@@ -403,7 +403,7 @@ public:
 #ifndef LOG_VM_CACHE_GROW_MIN_FREE_GB
 #define LOG_VM_CACHE_GROW_MIN_FREE_GB 10
 #endif
-    // Below this much available memory, the pages above LOG_VM_MIN_CACHE_PAGE are given back.
+    // Below this much available memory, one page per index above LOG_VM_MIN_CACHE_PAGE is given back at each check.
 #ifndef LOG_VM_CACHE_SHRINK_BELOW_GB
 #define LOG_VM_CACHE_SHRINK_BELOW_GB 8
 #endif
@@ -688,7 +688,7 @@ public:
 #endif
 
     // Called periodically from the main loop: below LOG_VM_CACHE_SHRINK_BELOW_GB of available
-    // memory, give back the log cache pages above LOG_VM_MIN_CACHE_PAGE. Returns pages released.
+    // memory, give back one log cache page per index above LOG_VM_MIN_CACHE_PAGE. Returns pages released.
     static unsigned int releaseLogCacheIfMemoryLow()
     {
 #if ENABLED_LOGGING

@@ -25,10 +25,13 @@
 
 #include "network_messages/header.h"
 #include "network_messages/tick.h"
+#include "optimizations/opt_config.h"
 
 namespace CatchupRxFilter
 {
 constexpr unsigned int KEEP_AHEAD = 64;
+// Ticks kept within this window must also have their transactions staged by the fast tx window.
+static_assert(KEEP_AHEAD <= FAST_TX_WINDOW_TICKS, "KEEP_AHEAD must not exceed FAST_TX_WINDOW_TICKS");
 // ~0.5 s of request processing at catch-up rates; far-future votes are only shed above this.
 constexpr unsigned short PRESSURE_QUEUED_ELEMENTS = 4096;
 
