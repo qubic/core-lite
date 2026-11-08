@@ -4,6 +4,7 @@
     <ClCompile Include="contract_core.cpp" />
     <ClCompile Include="m256.cpp" />
     <ClCompile Include="math_lib.cpp" />
+    <ClCompile Include="memory_headroom.cpp" />
     <ClCompile Include="network_messages.cpp" />
     <ClCompile Include="platform.cpp" />
     <ClCompile Include="qpi.cpp" />
