@@ -11,6 +11,7 @@
 #include <dirent.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 
@@ -214,6 +215,24 @@ namespace tickForkControl
         }
         while (writeSize < 0 && errno == EINTR);
         return writeSize == 1;
+    }
+
+    // Collects a checkpoint child that was told to retire. false: still exiting (only without block).
+    // A child that is not ours counts as collected: a promoted child inherits its sibling's pid.
+    inline bool collectRetiredChild(pid_t& child, bool block)
+    {
+        if (child <= 0)
+            return true;
+        pid_t waited;
+        do
+        {
+            waited = waitpid(child, nullptr, block ? 0 : WNOHANG);
+        }
+        while (waited < 0 && errno == EINTR);
+        if (waited == 0)
+            return false;
+        child = -1;
+        return true;
     }
 
     // crashTargetTick() is evaluated only if the parent failed, after its pipe closed, so it can read

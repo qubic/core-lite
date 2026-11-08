@@ -493,6 +493,38 @@ TEST(ForkRollbackControl, ExplicitRetireDoesNotPromote)
     EXPECT_EQ(command.targetTick, 0U);
 }
 
+TEST(ForkRollbackControl, RetiredChildIsCollectedWithoutBlockingTheRetire)
+{
+    int pipeFds[2];
+    ASSERT_EQ(pipe(pipeFds), 0);
+    pid_t child = fork();
+    ASSERT_GE(child, 0);
+    if (child == 0)
+    {
+        close(pipeFds[1]);
+        const auto command = tickForkControl::readChildCommand(pipeFds[0], 1234);
+        // Stands in for the kernel freeing a large address space.
+        usleep(300000);
+        _exit(command.action == tickForkControl::ChildAction::Retire ? 0 : 1);
+    }
+    close(pipeFds[0]);
+
+    ASSERT_TRUE(tickForkControl::writeRetireCommand(pipeFds[1]));
+    close(pipeFds[1]);
+
+    pid_t retired = child;
+    EXPECT_FALSE(tickForkControl::collectRetiredChild(retired, false));
+    EXPECT_EQ(retired, child);
+    EXPECT_TRUE(tickForkControl::collectRetiredChild(retired, true));
+    EXPECT_EQ(retired, -1);
+    EXPECT_TRUE(tickForkControl::collectRetiredChild(retired, true));
+
+    // Not our child, as in a promoted child that inherited its sibling's pid.
+    pid_t notOurChild = getppid();
+    EXPECT_TRUE(tickForkControl::collectRetiredChild(notOurChild, true));
+    EXPECT_EQ(notOurChild, -1);
+}
+
 TEST(ForkRollbackControl, ParentCrashEofStillPromotes)
 {
     int pipeFds[2];

@@ -10960,7 +10960,7 @@ static bool bspCommitCheckpoint()
     }
 
     // Once the donor is gone, a partial disk commit can only restart from a saved snapshot.
-    tickFork::reapCheckpointChild();
+    tickFork::retireCheckpointChild();
     gShadow.commit();
     tickFork::setWinState(tickFork::WindowState::Idle);
     tickForkLog("BSP retire complete");

@@ -496,7 +496,14 @@ namespace tickFork
         setWinState(WindowState::Live);
     }
 
-    inline void reapCheckpointChild()
+    // Last retired child, possibly still exiting. BSP only.
+    inline pid_t gRetiredChildPid = -1;
+
+    // Retires the child without waiting for it to exit: the kernel takes seconds to free the address
+    // space of a large node. The retire command is the point of no return: the child reads the pipe
+    // in order and no promote can precede it here, so once the byte is in the pipe the child can only
+    // exit, even if this process dies during the commit.
+    inline void retireCheckpointChild()
     {
         const pid_t child = gChildPid.load();
         if (child <= 0)
@@ -504,10 +511,17 @@ namespace tickFork
             tickForkLog("checkpoint child missing before commit -> supervisor restart");
             _exit(70);
         }
-        if (!tickForkControl::writeRetireCommand(gPipe[1]))
-            kill(child, SIGKILL);
-        while (waitpid(child, nullptr, 0) < 0 && errno == EINTR)
+        tickForkControl::collectRetiredChild(gRetiredChildPid, true);
+        if (tickForkControl::writeRetireCommand(gPipe[1]))
         {
+            gRetiredChildPid = child;
+        }
+        else
+        {
+            kill(child, SIGKILL);
+            while (waitpid(child, nullptr, 0) < 0 && errno == EINTR)
+            {
+            }
         }
         close(gPipe[1]);
         gPipe[1] = -1;
