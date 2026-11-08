@@ -72,6 +72,7 @@ add_executable(
    		logging_digest.cpp
    		m256.cpp
    		math_lib.cpp
+		memory_headroom.cpp
    		network_messages.cpp
    		contract_qpump.cpp
 		pending_txs_pool.cpp
