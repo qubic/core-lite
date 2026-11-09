@@ -1652,6 +1652,36 @@ static bool verifyTickVoteSignature(const unsigned char* publicKey, const unsign
     return true;
 }
 
+// First tick decided only by nodes that enforce the new vote target. Ticks from the switch up to
+// here were finalized while old-target votes still counted, so those stored votes must stay.
+static constexpr unsigned int TICK_VOTE_TARGET_ENFORCED_FROM = 91110060U;
+
+// A vote is checked only on arrival, and the first stored vote for a computor wins. A vote stored by
+// an older binary comes back from the swap VM or a snapshot and would block that computor's valid
+// vote for good, so drop the ones missing the target; the request loop then fetches them again.
+static unsigned int dropStoredVotesMissingTarget(const unsigned int tick)
+{
+    if (tick < TICK_VOTE_TARGET_ENFORCED_FROM || !ts.tickInCurrentEpochStorage(tick))
+    {
+        return 0;
+    }
+    const unsigned int target = getTargetTickVoteSignature(tick);
+    unsigned int dropped = 0;
+    for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
+    {
+        ts.ticks.acquireLock(i);
+        Tick* vote = ts.ticks.getByTickInCurrentEpoch(tick) + i;
+        if (vote->epoch == system.epoch && _byteswap_ulong(((unsigned int*)vote->signature)[0]) > target)
+        {
+            vote->epoch = 0;
+            faultyComputorFlags[i >> 6] &= ~(1ULL << (i & 63));
+            dropped++;
+        }
+        ts.ticks.releaseLock(i);
+    }
+    return dropped;
+}
+
 static void processBroadcastTick(Peer* peer, RequestResponseHeader* header)
 {
     if (!header->checkPayloadSize(sizeof(BroadcastTick)))
@@ -8087,6 +8117,22 @@ static void tickProcessor(void*, unsigned long long processorNumber)
         {
             const unsigned int currentTickIndex = ts.tickToIndexCurrentEpoch(system.tick);
             const unsigned int nextTickIndex = ts.tickToIndexCurrentEpoch(nextTick);
+
+            // Once per tick is enough: any vote stored from now on was checked on arrival.
+            static unsigned int staleVotesCheckedAtTick = 0;
+            if (system.tick != staleVotesCheckedAtTick)
+            {
+                staleVotesCheckedAtTick = system.tick;
+                const unsigned int droppedVotes = dropStoredVotesMissingTarget(system.tick) + dropStoredVotesMissingTarget(nextTick);
+                if (droppedVotes)
+                {
+                    setText(message, L"Dropped ");
+                    appendNumber(message, droppedVotes, false);
+                    appendText(message, L" stored votes missing the signature target at tick ");
+                    appendNumber(message, system.tick, false);
+                    logToConsole(message);
+                }
+            }
 
             updateFutureTickCount();
 
