@@ -663,6 +663,47 @@ public:
         return 0;
     }
 
+    // Votes are checked against the signing target only on arrival, so a snapshot taken before a
+    // target increase restores votes the running binary would now reject. Zeroes those for ticks >= fromTick.
+    unsigned int dropTickVotesAboveTarget(unsigned int fromTick, unsigned int (*targetForTick)(unsigned int tick))
+    {
+        unsigned int dropped = 0;
+        const unsigned int sweepBegin = (fromTick > tickBegin) ? fromTick : tickBegin;
+#ifdef USE_SWAP
+        const unsigned int sweepEnd = tickEnd;
+        constexpr unsigned int ticksPerPage = TICKS_PAGE_CAPACITY / NUMBER_OF_COMPUTORS;
+#else
+        const unsigned int sweepEnd = (metaData.tickEnd + 1 < tickEnd) ? metaData.tickEnd + 1 : tickEnd;
+#endif
+        for (unsigned int tick = sweepBegin; tick < sweepEnd; tick++)
+        {
+            PinScope _pinScope; // release this tick's swap-page pins before the next iteration
+#ifdef USE_SWAP
+            const unsigned int tickIndex = tickToIndexCurrentEpoch(tick);
+            if (!ticksSwapVM.holdsPage(tickIndex / ticksPerPage))
+            {
+                tick += ticksPerPage - 1 - (tickIndex % ticksPerPage); // skip to the page's last tick
+                continue;
+            }
+#endif
+            Tick* votes = ticks.getByTickInCurrentEpoch(tick);
+            const unsigned int target = targetForTick(tick);
+            for (unsigned int i = 0; i < NUMBER_OF_COMPUTORS; i++)
+            {
+                if (votes[i].epoch == 0)
+                {
+                    continue;
+                }
+                if (_byteswap_ulong(*((unsigned int*)votes[i].signature)) > target)
+                {
+                    setMem(&votes[i], sizeof(Tick), 0);
+                    dropped++;
+                }
+            }
+        }
+        return dropped;
+    }
+
     // Save a dummy metadata that invalidate the current snapshot
     bool saveInvalidateData(unsigned int epoch, CHAR16* directory = NULL)
     {
