@@ -12,6 +12,9 @@
 
 #include <random>
 
+// the node binary defines this in qubic.cpp; the test binary needs its own (MSVC keeps the reference from tryLoadFromFile)
+TickStorage::TransactionsDigestAccess TickStorage::transactionsDigestAccess;
+
 
 class TestTickStorage : public TickStorage
 {
