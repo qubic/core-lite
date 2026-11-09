@@ -392,18 +392,15 @@ public:
     // Log readers (e.g. indexers far behind) read old ticks at scattered positions; with only
     // VM_NUM_CACHE_PAGE pages per index they evict each other and every read reloads a whole page
     // (150-240 MB on mainnet) from disk. Each extra cache page costs one page of RAM per index, so
-    // pages above LOG_VM_MIN_CACHE_PAGE are only taken while the machine keeps
-    // LOG_VM_CACHE_GROW_MIN_FREE_GB of available memory (headroom for the fork checkpoints).
+    // pages above LOG_VM_MIN_CACHE_PAGE are only taken while the machine stays above the memory
+    // floor after paying for them (memoryHeadroom::cacheFloorBytes: what the fork window needs,
+    // plus a margin).
 #ifndef LOG_VM_NUM_CACHE_PAGE
 #define LOG_VM_NUM_CACHE_PAGE 16
 #endif
 #ifndef LOG_VM_MIN_CACHE_PAGE
 #define LOG_VM_MIN_CACHE_PAGE 4
 #endif
-#ifndef LOG_VM_CACHE_GROW_MIN_FREE_GB
-#define LOG_VM_CACHE_GROW_MIN_FREE_GB 10
-#endif
-    static constexpr unsigned long long logCacheGrowMinFreeBytes = (unsigned long long)LOG_VM_CACHE_GROW_MIN_FREE_GB << 30;
     inline static VirtualMemory<char, TEXT_BUF_AS_NUMBER, TEXT_LOGS_AS_NUMBER, LOG_BUFFER_PAGE_SIZE, LOG_VM_NUM_CACHE_PAGE> logBuffer;
     inline static VirtualMemory<BlobInfo, TEXT_PMAP_AS_NUMBER, TEXT_LOGS_AS_NUMBER, PMAP_LOG_PAGE_SIZE, LOG_VM_NUM_CACHE_PAGE> mapLogIdToBufferIndex;
     inline static VirtualMemory<TickBlobInfo, TEXT_IMAP_AS_NUMBER, TEXT_LOGS_AS_NUMBER, IMAP_LOG_PAGE_SIZE, LOG_VM_NUM_CACHE_PAGE> mapTxToLogId;
@@ -519,8 +516,8 @@ public:
     {
         static bool init()
         {
-            mapLogIdToBufferIndex.setCacheGrowth(LOG_VM_MIN_CACHE_PAGE, logCacheGrowMinFreeBytes);
-            logBuffer.setCacheGrowth(LOG_VM_MIN_CACHE_PAGE, logCacheGrowMinFreeBytes);
+            mapLogIdToBufferIndex.setCacheGrowth(LOG_VM_MIN_CACHE_PAGE);
+            logBuffer.setCacheGrowth(LOG_VM_MIN_CACHE_PAGE);
             return mapLogIdToBufferIndex.init() && logBuffer.init();
         }
 
@@ -581,7 +578,7 @@ public:
     {
         static bool init()
         {
-            mapTxToLogId.setCacheGrowth(LOG_VM_MIN_CACHE_PAGE, logCacheGrowMinFreeBytes);
+            mapTxToLogId.setCacheGrowth(LOG_VM_MIN_CACHE_PAGE);
             return mapTxToLogId.init();
         }
 
@@ -682,6 +679,53 @@ public:
         }
     } tx;
 #endif
+
+    // Called periodically from the main loop: below the memory floor, give back the oldest log cache
+    // pages above LOG_VM_MIN_CACHE_PAGE, across the three indexes, until the shortfall is covered.
+    // Returns pages released.
+    static unsigned int releaseLogCacheIfMemoryLow()
+    {
+#if ENABLED_LOGGING
+        const long long availableBytes = availableMemoryBytes();
+        if (availableBytes < 0)
+        {
+            return 0;
+        }
+        long long shortfall = memoryHeadroom::cacheFloorBytes() - availableBytes;
+        unsigned int released = 0;
+        while (shortfall > 0)
+        {
+            const unsigned long long txMapAccess = mapTxToLogId.oldestReleasableCacheAccess();
+            const unsigned long long logMapAccess = mapLogIdToBufferIndex.oldestReleasableCacheAccess();
+            const unsigned long long bufferAccess = logBuffer.oldestReleasableCacheAccess();
+            unsigned long long oldest = txMapAccess;
+            if (logMapAccess && (!oldest || logMapAccess < oldest))
+            {
+                oldest = logMapAccess;
+            }
+            if (bufferAccess && (!oldest || bufferAccess < oldest))
+            {
+                oldest = bufferAccess;
+            }
+            if (!oldest)
+            {
+                break;
+            }
+            const unsigned long long freedBytes = oldest == txMapAccess ? mapTxToLogId.tryReleaseOldestCacheSlot()
+                : oldest == logMapAccess ? mapLogIdToBufferIndex.tryReleaseOldestCacheSlot()
+                : logBuffer.tryReleaseOldestCacheSlot();
+            if (!freedBytes)
+            {
+                break; // Lock busy: the next periodic call retries.
+            }
+            shortfall -= (long long)freedBytes;
+            released++;
+        }
+        return released;
+#else
+        return 0;
+#endif
+    }
 
     static void registerNewTx(const unsigned int tick, const unsigned int txId)
     {

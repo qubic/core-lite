@@ -272,3 +272,53 @@ TEST(TestCoreTickStorage, EpochTransition)
         ts.deinit();
     }
 }
+
+static unsigned int testVoteTarget(unsigned int tick)
+{
+    return (tick >= 1020) ? 0x1000u : 0xFFFFFFFFu;
+}
+
+static void setVoteScore(Tick& vote, unsigned int score)
+{
+    vote.epoch = 1234;
+    *((unsigned int*)vote.signature) = _byteswap_ulong(score);
+}
+
+TEST(TestCoreTickStorage, DropTickVotesAboveTargetAfterSnapshotLoad)
+{
+    TestTickStorage ts;
+    ASSERT_TRUE(ts.init());
+    const unsigned int tick0 = 1000;
+    ts.beginEpoch(tick0);
+    for (unsigned int tick = tick0; tick <= 1024; tick++)
+    {
+        ts.addTick(tick, tick, 0);
+    }
+
+    setVoteScore(ts.ticks.getByTickInCurrentEpoch(1010)[0], 0x5000);
+    setVoteScore(ts.ticks.getByTickInCurrentEpoch(1020)[1], 0x0FFF);
+    setVoteScore(ts.ticks.getByTickInCurrentEpoch(1020)[2], 0x1000);
+    setVoteScore(ts.ticks.getByTickInCurrentEpoch(1020)[3], 0x1001);
+
+    ts.tickTransactions(0); // commit the empty transaction prefix the snapshot writes
+    ASSERT_EQ(ts.trySaveToFile(1234, 1024), 0);
+
+    ts.beginEpoch(tick0);
+    for (unsigned int tick = tick0; tick <= 1024; tick++)
+    {
+        ts.tickData.getByTickInCurrentEpoch(tick); // commit the pages the snapshot load writes into
+        ts.ticks.getByTickInCurrentEpoch(tick);
+        ts.tickTransactionOffsets.getByTickInCurrentEpoch(tick);
+    }
+    ts.tickTransactions(0);
+    ASSERT_EQ(ts.tryLoadFromFile(1234, NULL), 0);
+
+    EXPECT_EQ(ts.dropTickVotesAboveTarget(1020, testVoteTarget), 1u);
+    EXPECT_EQ(ts.ticks.getByTickInCurrentEpoch(1010)[0].epoch, 1234);
+    EXPECT_EQ(ts.ticks.getByTickInCurrentEpoch(1020)[1].epoch, 1234);
+    EXPECT_EQ(ts.ticks.getByTickInCurrentEpoch(1020)[2].epoch, 1234);
+    EXPECT_EQ(ts.ticks.getByTickInCurrentEpoch(1020)[3].epoch, 0);
+
+    ts.beginEpoch(0);
+    ts.deinit();
+}

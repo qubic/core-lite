@@ -19,6 +19,9 @@
 #include <thread>
 #include <new>
 #include <sys/mman.h>
+#include <sys/resource.h>
+#include <pthread.h>
+#include <sched.h>
 #include "platform/memory_headroom.h"
 #include "extensions/tick_fork_control.h"
 
@@ -115,17 +118,104 @@ namespace tickFork
 
     // Checkpoint-and-replay: k ticks share one fork (amortizes the O(RSS) fork). The checkpoint child
     // stays alive across the window; match keeps it, mismatch rewinds+replays strict, staleness commits.
-    inline unsigned int gForkWindowK = 64;
-    // Window while far behind (catch-up receive filter armed): each checkpoint parks every request
-    // processor for a fork and a shadow commit, which at catch-up speed comes every few seconds.
+    // Each checkpoint parks every request processor for a fork and a shadow commit (about 3 s on
+    // mainnet), so a much shorter window cannot keep up with a fast network: 64 ticks ran at about
+    // 6 ticks/s. A mismatch replays up to this many ticks.
+    inline constexpr unsigned int gForkWindowKNominal = 256;
     // Set when a checkpoint is established, so parent and child always agree on the window.
-    inline constexpr unsigned int gForkWindowKInSync = 64;
-    inline constexpr unsigned int gForkWindowKCatchup = 256;
+    inline unsigned int gForkWindowK = gForkWindowKNominal;
     inline unsigned int gCheckpointTick = 0;
     // Every page the parent writes during a window is copied for the checkpoint child, so a long
-    // window can exhaust RAM on smaller machines. Below this much available memory, the window is
-    // closed (committed) early instead of waiting for gForkWindowK ticks.
-    inline constexpr long long gForkWindowMinFreeBytes = 6LL << 30;
+    // window can exhaust RAM on smaller machines. The window is measured while it runs, sized to the
+    // memory available when it opens, and closed (committed) early if it outgrows that.
+    inline memoryHeadroom::WindowRateHistory gWindowRates;   // tick thread only
+    inline std::atomic<unsigned long long> gWindowBytesPerTick{ 0 };  // latest reading of the open window
+    inline std::atomic<unsigned long long> gWindowCacheGrownAtFork{ 0 };
+    inline std::atomic<unsigned int> gWindowSerial{ 0 };     // tells the sampler that a window changed
+
+    inline void publishForkMemoryNeed(unsigned int ticksLeft)
+    {
+        memoryHeadroom::gForkNeedBytes.store(memoryHeadroom::forkNeedBytes(gWindowRates.maxBytesPerTick(), ticksLeft),
+                                             std::memory_order_relaxed);
+    }
+
+    // Reads the window's memory from its own thread: the read takes seconds on a large node. Two
+    // readings per window, past the middle so that the rate is not inflated by the first writes,
+    // and not near the end: a read running across the next fork() would delay it.
+    inline void sampleOpenWindowMemory(unsigned int& sampledSerial, unsigned int& readingsDone)
+    {
+        if (winState() != WindowState::Live)
+            return;
+        const unsigned int serial = gWindowSerial.load(std::memory_order_acquire);
+        if (serial != sampledSerial)
+        {
+            sampledSerial = serial;
+            readingsDone = 0;
+        }
+        const unsigned int checkpointTick = gCheckpointTick;
+        const unsigned int windowTicks = gForkWindowK;
+        const unsigned int ticksDone = (unsigned)system.tick - checkpointTick;
+        const unsigned int nextReadingTick = readingsDone == 0 ? windowTicks / 2 : windowTicks * 3 / 4;
+        if (readingsDone >= 2 || !ticksDone || ticksDone < nextReadingTick || ticksDone >= windowTicks * 7 / 8)
+            return;
+
+        readingsDone++;
+        const long long privateBytes = processPrivateDirtyBytes();
+        // Discard a reading that overlapped the end of the window: without the child, all is private.
+        if (privateBytes < 0 || winState() != WindowState::Live || gWindowSerial.load(std::memory_order_acquire) != serial)
+            return;
+        const unsigned long long cacheGrownBytes = memoryHeadroom::gCacheGrownBytes.load(std::memory_order_relaxed)
+            - gWindowCacheGrownAtFork.load(std::memory_order_relaxed);
+        const unsigned long long windowBytes = (unsigned long long)privateBytes > cacheGrownBytes ? (unsigned long long)privateBytes - cacheGrownBytes : 0;
+        gWindowBytesPerTick.store(windowBytes / ticksDone, std::memory_order_relaxed);
+    }
+
+    inline void* windowMemorySamplerThread(void*)
+    {
+        // Spawned from the pinned tick thread: move off its core, and yield to node threads.
+        cpu_set_t allCpus;
+        CPU_ZERO(&allCpus);
+        const long cpuCount = sysconf(_SC_NPROCESSORS_ONLN);
+        for (long cpu = 0; cpu < cpuCount && cpu < CPU_SETSIZE; cpu++)
+            CPU_SET(cpu, &allCpus);
+        sched_setaffinity(0, sizeof(allCpus), &allCpus);
+        setpriority(PRIO_PROCESS, 0, 10);
+
+        unsigned int sampledSerial = 0;
+        unsigned int readingsDone = 0;
+        for (;;)
+        {
+            sampleOpenWindowMemory(sampledSerial, readingsDone);
+            usleep(50'000);
+        }
+        return nullptr;
+    }
+
+    // fork() keeps only the calling thread: a promoted child starts its own sampler at its first window.
+    inline void ensureWindowMemorySampler()
+    {
+        static pid_t samplerProcess = 0;
+        const pid_t self = getpid();
+        if (samplerProcess == self)
+            return;
+        pthread_attr_t attributes;
+        pthread_attr_init(&attributes);
+        pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+        pthread_t thread;
+        if (pthread_create(&thread, &attributes, windowMemorySamplerThread, nullptr) == 0)
+            samplerProcess = self;
+        pthread_attr_destroy(&attributes);
+    }
+
+    inline void recordWindowMemory()
+    {
+        const unsigned long long bytesPerTick = gWindowBytesPerTick.exchange(0, std::memory_order_relaxed);
+        gWindowRates.record(bytesPerTick);
+        char message[160];
+        snprintf(message, sizeof(message), "window memory: %llu MB/tick over %u ticks, peak of last %u windows %llu MB/tick",
+                 bytesPerTick >> 20, gForkWindowK, memoryHeadroom::WindowRateHistory::capacity, gWindowRates.maxBytesPerTick() >> 20);
+        tickForkLog(message);
+    }
 
     // Last tick the parent started, in a page shared with the checkpoint child. If the parent dies
     // without a verdict (e.g. OOM-killed), the child replays strict only up to that tick instead of
@@ -160,7 +250,7 @@ namespace tickFork
     inline bool memoryLowForWindow()
     {
         const long long availableBytes = availableMemoryBytes();
-        return availableBytes >= 0 && availableBytes < gForkWindowMinFreeBytes;
+        return availableBytes >= 0 && availableBytes < memoryHeadroom::forkFloorBytes();
     }
     // Deadline to hand work to the BSP and quiesce fork writers before a fork / shadow commit.
     inline constexpr int gForkQuiesceTimeoutMs = 5'000;
@@ -332,14 +422,25 @@ namespace tickFork
     // writers, drains VM IO, arms the shadow, and forks.
     inline void establishCheckpoint()
     {
-        gForkWindowK = CatchupRxFilter::gDropAboveTick.load(std::memory_order_relaxed) ? gForkWindowKCatchup : gForkWindowKInSync;
+        const long long availableBytes = availableMemoryBytes();
+        gForkWindowK = availableBytes < 0 ? gForkWindowKNominal
+            : memoryHeadroom::windowTicksThatFit(availableBytes, gWindowRates.maxBytesPerTick(), gForkWindowKNominal);
+        publishForkMemoryNeed(gForkWindowK);
         if (gForkBench)
         {
             gForkWindowStartNs = tickForkNowNs();
             gForkRssBeforeKb = tickForkRssKb();
         }
-        tickForkLog(gForkWindowK == gForkWindowKCatchup ? "checkpoint -> request BSP fork (catch-up window 256)"
-                                                        : "checkpoint -> request BSP fork");
+        tickForkLog("checkpoint -> request BSP fork");
+        if (gForkWindowK != gForkWindowKNominal)
+        {
+            char message[96];
+            snprintf(message, sizeof(message), "window shortened to %u ticks to fit available memory", gForkWindowK);
+            tickForkLog(message);
+        }
+        ensureWindowMemorySampler();
+        gWindowBytesPerTick.store(0, std::memory_order_relaxed);
+        gWindowCacheGrownAtFork.store(memoryHeadroom::gCacheGrownBytes.load(std::memory_order_relaxed), std::memory_order_relaxed);
         ensureParentProgressPage();
         noteParentProgress((unsigned)system.tick);
         setWinState(WindowState::Checkpointing);
@@ -391,6 +492,7 @@ namespace tickFork
         gCheckpointTick = (unsigned)system.tick;
         ForkStats::onForkOk();
         tickForkLog("parent: checkpoint forked, optimistic processTick ahead");
+        gWindowSerial.fetch_add(1, std::memory_order_release);
         setWinState(WindowState::Live);
     }
 
@@ -422,6 +524,7 @@ namespace tickFork
         }
         tickForkLog("window complete -> commit shadow + reap checkpoint");
         setWinState(WindowState::Retiring);
+        recordWindowMemory();
         if (!tickForkControl::gBspRetireHandoff.requestAndWait(gForkQuiesceTimeoutMs))
         {
             // Tell the child to promote — its state is at the checkpoint, it replays the window strict.
@@ -493,6 +596,7 @@ namespace tickFork
         switch (winState())
         {
         case WindowState::Idle:
+            publishForkMemoryNeed(gForkWindowKNominal);
             if (!gForkForceFork && !tickHasSolution(system.tick))
             {
                 return;
@@ -503,6 +607,7 @@ namespace tickFork
         case WindowState::Live:
             if ((unsigned)system.tick - gCheckpointTick < gForkWindowK)
             {
+                publishForkMemoryNeed(gForkWindowK - ((unsigned)system.tick - gCheckpointTick));
                 if (!memoryLowForWindow())
                 {
                     noteParentProgress((unsigned)system.tick);

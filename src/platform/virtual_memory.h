@@ -235,10 +235,24 @@ protected:
 #endif
     }
 
-    // Opt-in cache growth limit (setCacheGrowth): slots above cacheMinSlots are taken only while the
-    // machine has at least cacheGrowMinFreeBytes of available memory. 0 = no limit (default).
+    // Opt-in cache growth limit (setCacheGrowth): a slot above cacheMinSlots is taken only if the
+    // machine stays above the memory floor after paying for it. false = no limit (default).
     unsigned long long cacheMinSlots = numCachePage;
-    unsigned long long cacheGrowMinFreeBytes = 0;
+    bool cacheGrowthLimited = false;
+
+    bool hasMemoryForOneMoreSlot() const
+    {
+        const long long availableBytes = availableMemoryBytes();
+        return availableBytes >= 0 && availableBytes - (long long)pageSize >= memoryHeadroom::cacheFloorBytes();
+    }
+
+    void noteCacheSlotTaken() const
+    {
+        if (cacheGrowthLimited)
+        {
+            memoryHeadroom::gCacheGrownBytes.fetch_add(pageSize, std::memory_order_relaxed);
+        }
+    }
 
     // return the slot to fill: a free one if allowed, else the most outdated cache page
     int getMostOutdatedCachePage()
@@ -261,17 +275,10 @@ protected:
                 min_index = i;
             }
         }
-        if (free_index && (!min_index || !cacheGrowMinFreeBytes || (unsigned long long)free_index <= cacheMinSlots))
+        if (free_index && (!min_index || !cacheGrowthLimited || (unsigned long long)free_index <= cacheMinSlots || hasMemoryForOneMoreSlot()))
         {
+            noteCacheSlotTaken();
             return free_index;
-        }
-        if (free_index)
-        {
-            const long long availableBytes = availableMemoryBytes();
-            if (availableBytes >= 0 && (unsigned long long)availableBytes >= cacheGrowMinFreeBytes)
-            {
-                return free_index;
-            }
         }
         return min_index;
     }
@@ -394,7 +401,7 @@ protected:
 
     void reset()
     {
-        if (cacheGrowMinFreeBytes)
+        if (cacheGrowthLimited)
         {
             // Hand the pool back instead of writing it, so cache slots cost RAM only once used.
             zeroPool(currentPage, pageSize * (numCachePage + 1));
@@ -418,12 +425,65 @@ public:
         memLock = 0;
     }
 
-    // Call before init(). Keeps up to minSlots cache pages unconditionally and takes more only while
-    // the machine has growMinFreeBytes of available memory; unused slots cost no RAM.
-    void setCacheGrowth(unsigned long long minSlots, unsigned long long growMinFreeBytes)
+    // Call before init(). Keeps up to minSlots cache pages unconditionally and takes more only if the
+    // machine stays above the memory floor (memoryHeadroom::cacheFloorBytes); unused slots cost no RAM.
+    void setCacheGrowth(unsigned long long minSlots)
     {
         cacheMinSlots = minSlots;
-        cacheGrowMinFreeBytes = growMinFreeBytes;
+        cacheGrowthLimited = true;
+    }
+
+    // With setCacheGrowth: last access time of the oldest slot above minSlots, 0 if none is in use.
+    unsigned long long oldestReleasableCacheAccess() const
+    {
+        if (!cacheGrowthLimited || currentPage == NULL)
+        {
+            return 0;
+        }
+        unsigned long long oldest = 0;
+        for (unsigned long long i = cacheMinSlots + 1; i <= numCachePage; i++)
+        {
+            const unsigned long long accessed = lastAccessedTimestamp[i];
+            if (accessed && (!oldest || accessed < oldest))
+            {
+                oldest = accessed;
+            }
+        }
+        return oldest;
+    }
+
+    // With setCacheGrowth: give the RAM of the oldest slot above minSlots back to the system. While a
+    // fork window is open the RAM of a page shared with the checkpoint comes back when it closes.
+    // Non-blocking: does nothing if a writer holds the lock (it may be loading a page from disk).
+    // Returns the bytes released, 0 if nothing was.
+    unsigned long long tryReleaseOldestCacheSlot()
+    {
+        if (!cacheGrowthLimited || currentPage == NULL)
+        {
+            return 0;
+        }
+        if (!TRY_ACQUIRE(memLock))
+        {
+            return 0;
+        }
+        while (memReaders)
+            _mm_pause();
+        unsigned long long oldestSlot = 0;
+        for (unsigned long long i = cacheMinSlots + 1; i <= numCachePage; i++)
+        {
+            if (lastAccessedTimestamp[i] && (!oldestSlot || lastAccessedTimestamp[i] < lastAccessedTimestamp[oldestSlot]))
+            {
+                oldestSlot = i;
+            }
+        }
+        if (oldestSlot)
+        {
+            zeroPool(cache[oldestSlot], pageSize);
+            lastAccessedTimestamp[oldestSlot] = 0;
+            cachePageId[oldestSlot] = 0xffffffffffffffffULL;
+        }
+        RELEASE(memLock);
+        return oldestSlot ? pageSize : 0;
     }
 
     bool init()
@@ -1386,6 +1446,23 @@ public:
     SwapVirtualMemory()
     {
         VMBase();
+    }
+
+    // A page restored from a snapshot lives in its .pg file or in a dumped cache slot.
+    bool holdsPage(unsigned long long pageId) const
+    {
+        if (pageId < MAX_PAGE && isPageWrittenToDisk[pageId])
+        {
+            return true;
+        }
+        for (unsigned long long slot = 0; slot <= numCachePage; slot++)
+        {
+            if (cachePageId[slot] == pageId)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     ~SwapVirtualMemory()

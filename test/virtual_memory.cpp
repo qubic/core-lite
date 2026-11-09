@@ -927,3 +927,59 @@ TEST(TestSwapVirtualMemory, ScopeReleasesPinsTakenAfterDrain) {
     EXPECT_EQ(vm.getPinnedNow(), 0);
     EXPECT_EQ(tlPinArena.count, 0);
 }
+
+TEST(TestVirtualMemory, CacheGrowthFollowsMemoryFloorAndReleasesOldest) {
+    if (availableMemoryBytes() < memoryHeadroom::baseMarginBytes + (1LL << 30))
+    {
+        return; // Needs available memory above the base margin; unknown on Windows.
+    }
+    initFilesystem();
+    registerAsynFileIO(NULL);
+    constexpr unsigned long long pageCapacity = 4096;
+    constexpr unsigned long long pagesToWrite = 10;
+    VirtualMemory<char, wcharToNumber(L"grow"), 0, pageCapacity, 6> vm;
+    vm.setCacheGrowth(2);
+    vm.init();
+    unsigned long long written = 0;
+    const auto appendPages = [&](unsigned long long pages) {
+        for (unsigned long long i = 0; i < pages * pageCapacity; i++)
+        {
+            vm.append((char)(written % 251));
+            written++;
+        }
+    };
+
+    // Floor out of reach: only the guaranteed slots are used.
+    memoryHeadroom::gForkNeedBytes.store(1LL << 50);
+    appendPages(pagesToWrite / 2);
+    EXPECT_EQ(vm.oldestReleasableCacheAccess(), 0u);
+    EXPECT_EQ(vm.tryReleaseOldestCacheSlot(), 0u);
+
+    // Floor within reach: the cache grows, and gives its pages back oldest first.
+    memoryHeadroom::gForkNeedBytes.store(0);
+    appendPages(pagesToWrite / 2);
+    unsigned long long previousOldest = vm.oldestReleasableCacheAccess();
+    EXPECT_NE(previousOldest, 0u);
+    unsigned int released = 0;
+    while (vm.oldestReleasableCacheAccess())
+    {
+        EXPECT_EQ(vm.tryReleaseOldestCacheSlot(), pageCapacity);
+        const unsigned long long oldest = vm.oldestReleasableCacheAccess();
+        if (oldest)
+        {
+            EXPECT_GE(oldest, previousOldest);
+            previousOldest = oldest;
+        }
+        released++;
+    }
+    EXPECT_GT(released, 0u);
+    EXPECT_LE(released, 4u);
+
+    // Released pages are read back from disk.
+    for (unsigned long long i = 0; i < pagesToWrite * pageCapacity; i += 97)
+    {
+        EXPECT_EQ(vm[i], (char)(i % 251));
+    }
+    vm.deinit();
+    memoryHeadroom::gForkNeedBytes.store(memoryHeadroom::baseMarginBytes);
+}

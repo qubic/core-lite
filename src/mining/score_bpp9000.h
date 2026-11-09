@@ -6,6 +6,7 @@
 #include "rating.h"
 #include "task_file.h"
 #include "trit_pack.h"
+#include "extensions/score_bpp9000_fast.h"
 
 namespace score_engine
 {
@@ -677,6 +678,16 @@ struct ScoreBpp9000
     // neighborIndices/curLut, so a rejected candidate would otherwise score against a stale cache.
     Rating advanceShift()
     {
+#ifndef LITE_BPP9000_NO_FAST_REPLAY
+        // Lite: same Rating and shift from the 32-neuron replay.
+        if constexpr (LiteBpp9000::FastReplay<ScoreBpp9000>::supported)
+        {
+            if (LiteBpp9000::fastReplayEnabled)
+            {
+                return LiteBpp9000::FastReplay<ScoreBpp9000>::advanceShift(*this);
+            }
+        }
+#endif
         if (activeMode == BPP9000_MODE_WIRING)
         {
             buildGatherControls();
@@ -864,6 +875,16 @@ struct ScoreBpp9000
 
     Rating advanceShift()
     {
+#ifndef LITE_BPP9000_NO_FAST_REPLAY
+        // Lite: same Rating and shift from the 32-neuron replay.
+        if constexpr (LiteBpp9000::FastReplay<ScoreBpp9000>::supported)
+        {
+            if (LiteBpp9000::fastReplayEnabled)
+            {
+                return LiteBpp9000::FastReplay<ScoreBpp9000>::advanceShift(*this);
+            }
+        }
+#endif
         for (;;)
         {
             const unsigned int frameError = score();

@@ -72,6 +72,7 @@ add_executable(
    		logging_digest.cpp
    		m256.cpp
    		math_lib.cpp
+		memory_headroom.cpp
    		network_messages.cpp
    		contract_qpump.cpp
 		pending_txs_pool.cpp
@@ -82,7 +83,7 @@ add_executable(
    		qpi_hash_map.cpp
 		qpi_linked_list.cpp
    		revenue.cpp
-   		score.cpp
+   		lite_score.cpp
    		score_cache.cpp
    		spectrum.cpp
    		stdlib_impl.cpp
