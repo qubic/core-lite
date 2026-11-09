@@ -6648,6 +6648,14 @@ static bool loadAllNodeStates()
         logToConsole(L"Failed to load tick storage");
         return false;
     }
+    const unsigned int droppedVotes = ts.dropTickVotesAboveTarget(TICK_VOTE_SIGNATURE_SWITCH_TICK, getTargetTickVoteSignature);
+    if (droppedVotes > 0)
+    {
+        setText(message, L"Dropped ");
+        appendNumber(message, droppedVotes, FALSE);
+        appendText(message, L" snapshot tick votes signed above the current target");
+        logToConsole(message);
+    }
     SPECTRUM_FILE_NAME[sizeof(SPECTRUM_FILE_NAME) / sizeof(SPECTRUM_FILE_NAME[0]) - 4] = L'0';
     SPECTRUM_FILE_NAME[sizeof(SPECTRUM_FILE_NAME) / sizeof(SPECTRUM_FILE_NAME[0]) - 3] = L'0';
     SPECTRUM_FILE_NAME[sizeof(SPECTRUM_FILE_NAME) / sizeof(SPECTRUM_FILE_NAME[0]) - 2] = L'0';
