@@ -29,7 +29,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../src)
 include_directories(${PROJECT_ROOT_DIR})
 
 file(COPY data/example_task_bpp9000.bin data/samples_bpp9000.csv data/scores_bpp9000.csv
-     data/bpp9000.task data/gt_production.csv data/gt_ant_production.csv
+     data/bpp9000.task data/gt_production.csv data/gt_ant_production.csv data/gt_ant_positive.csv
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/data)
 
 add_executable(
@@ -83,7 +83,7 @@ add_executable(
    		qpi_hash_map.cpp
 		qpi_linked_list.cpp
    		revenue.cpp
-   		lite_score.cpp
+   		score.cpp
    		score_cache.cpp
    		spectrum.cpp
    		stdlib_impl.cpp

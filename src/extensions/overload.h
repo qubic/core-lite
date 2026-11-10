@@ -476,7 +476,8 @@ inline void qVirtualAdviseHugePages(void* address, const unsigned long long size
 
 inline void* qVirtualAlloc(const unsigned long long size, bool commitMem = false, bool hugePageHint) {
     int prot = commitMem ? (PROT_READ | PROT_WRITE) : PROT_NONE;
-    void* addr = mmap(nullptr, size, prot, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    // MAP_NORESERVE: a demand-zero pool larger than RAM+swap is otherwise refused by the overcommit heuristic.
+    void* addr = mmap(nullptr, size, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (addr != MAP_FAILED)
     {
         qVirtualAdviseHugePages(addr, size, hugePageHint, false);
@@ -538,7 +539,7 @@ inline bool qVirtualFreeAndRecommit(void* address, const unsigned long long size
     memset(head, 0, remapStart - head);
 
     const unsigned long long remapSize = remapEnd - remapStart;
-    if (mmap(remapStart, remapSize, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != remapStart)
+    if (mmap(remapStart, remapSize, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0) != remapStart)
     {
         return false;
     }
