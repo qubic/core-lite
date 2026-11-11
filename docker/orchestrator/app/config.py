@@ -195,6 +195,9 @@ class OrchestratorConfig(BaseSettings):
     # Network / Epoch
     epoch_api_url: str = "https://api.qubic.li/public/EpochInfo"
     snapshot_service_url: str = "https://storage.qubic.li"
+    # Tried when the epoch archive from snapshot_service_url is missing or broken.
+    # "{epoch}" is replaced by the epoch number; empty disables it.
+    epoch_files_fallback_url: str = "https://dl.qubic.global/ep{epoch}.zip"
     compiled_epoch: Optional[int] = None
     force_download: bool = False
 
