@@ -176,7 +176,7 @@ static constexpr unsigned long long BPP9000_SEQUENCE_LENGTH = 24 * 365 + 24 * 7;
 static constexpr unsigned long long BPP9000_WINDOW_WIDTH = 24 * 365;
 // How far the frame may slide: production predicts one week ahead.
 static constexpr unsigned long long BPP9000_SHIFT_CAP = 24 * 7;
-static constexpr unsigned int BPP9000_ADVANCE_THRESHOLD = 2920;
+static constexpr unsigned int BPP9000_ADVANCE_THRESHOLD = 3942;
 #ifdef TESTNET
 // The mainnet floor is rarely reached at depth 1, so a local tree would never start. Raised on testnet
 // so walks qualify and the tree deepens; deeper nodes must still strictly beat their parent.
