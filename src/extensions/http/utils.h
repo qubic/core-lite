@@ -3,13 +3,6 @@
 #include "platform/concurrency.h"
 #include <drogon/drogon.h>   // fetch() below takes drogon types; do not rely on include order
 #include <trantor/net/EventLoopThread.h>
-#include <atomic>
-#include <chrono>
-#include <condition_variable>
-#include <cstdio>
-#include <memory>
-#include <mutex>
-#include <thread>
 
 class HttpUtils
 {
@@ -218,116 +211,36 @@ public:
         return nullptr;
     }
 
-    // The fork census is held while a request runs, so a request that never returns would block every
-    // later fork and leave the node scoring each tick strict. The request runs on its own thread and the
-    // caller stops waiting after kFetchDeadlineSeconds, leaving that thread behind.
-    static constexpr int kFetchDeadlineSeconds = 45;
-    // Requests left behind and still running; past this, fetch() fails at once instead of piling up threads.
-    static constexpr int kMaxAbandonedFetches = 4;
-    inline static std::atomic<int> gAbandonedFetches{ 0 };
-
     static void fetch(const std::string &url, const std::string &path, const drogon::HttpMethod method, const Json::Value &body, const std::map<std::string, std::string> &headers = {}, std::function<void(drogon::ReqResult &result, const drogon::HttpResponsePtr &resp)> callback = nullptr)
     {
-        struct Outcome
+        struct ForkCensusScope
         {
-            std::mutex m;   // SMARTMUTEX-EXEMPT: guards one request's result for a moment, never held over node state
-            std::condition_variable cv;
-            bool haveResult = false;
-            bool done = false;        // the request thread has also torn down its client and event loop
-            bool abandoned = false;
-            drogon::ReqResult result = drogon::ReqResult::NetworkFailure;
-            drogon::HttpResponsePtr resp;
-        };
+            ForkCensusScope() { forkCensusEnter("HttpUtils::fetch"); }
+            ~ForkCensusScope() { forkCensusLeave(); }
+        } forkCensusScope;
 
-        drogon::ReqResult result = drogon::ReqResult::Timeout;
-        drogon::HttpResponsePtr resp;
-        if (gAbandonedFetches.load() >= kMaxAbandonedFetches)
+        trantor::EventLoopThread loopThread("qubic-http-client");
+        loopThread.run();
+        auto client = drogon::HttpClient::newHttpClient(url, loopThread.getLoop());
+
+        // Serialize per-call: newHttpJsonRequest() shares a process-wide static StreamWriterBuilder that this background thread races against drogon's loop threads (SIGSEGV in newStreamWriter()).
+        auto req = drogon::HttpRequest::newHttpRequest();
+        req->setMethod(method);
+        req->setPath(path);
+        if (!body.isNull())
         {
-            result = drogon::ReqResult::NetworkFailure;
-            if (callback != nullptr)
-            {
-                callback(result, resp);
-            }
-            return;
+            Json::StreamWriterBuilder jsonWriter;
+            jsonWriter["commentStyle"] = "None";
+            jsonWriter["indentation"] = "";
+            req->setBody(Json::writeString(jsonWriter, body));
+            req->setContentTypeCode(drogon::CT_APPLICATION_JSON);
         }
 
-        auto outcome = std::make_shared<Outcome>();
-        {
-            struct ForkCensusScope
-            {
-                ForkCensusScope() { forkCensusEnter("HttpUtils::fetch"); }
-                ~ForkCensusScope() { forkCensusLeave(); }
-            } forkCensusScope;
-
-            std::thread([outcome, url, path, method, body, headers]()
-            {
-                {
-                    drogon::ReqResult requestResult = drogon::ReqResult::NetworkFailure;
-                    drogon::HttpResponsePtr requestResp;
-                    try
-                    {
-                        trantor::EventLoopThread loopThread("qubic-http-client");
-                        loopThread.run();
-                        auto client = drogon::HttpClient::newHttpClient(url, loopThread.getLoop());
-
-                        // Serialize per-call: newHttpJsonRequest() shares a process-wide static StreamWriterBuilder that this background thread races against drogon's loop threads (SIGSEGV in newStreamWriter()).
-                        auto req = drogon::HttpRequest::newHttpRequest();
-                        req->setMethod(method);
-                        req->setPath(path);
-                        if (!body.isNull())
-                        {
-                            Json::StreamWriterBuilder jsonWriter;
-                            jsonWriter["commentStyle"] = "None";
-                            jsonWriter["indentation"] = "";
-                            req->setBody(Json::writeString(jsonWriter, body));
-                            req->setContentTypeCode(drogon::CT_APPLICATION_JSON);
-                        }
-
-                        for (const auto& header : headers) {
-                            req->addHeader(header.first, header.second);
-                        }
-
-                        auto [sentResult, sentResp] = client->sendRequest(req, 30.0);
-                        {
-                            std::lock_guard<std::mutex> lock(outcome->m);
-                            outcome->result = sentResult;
-                            outcome->resp = sentResp;
-                            outcome->haveResult = true;
-                        }
-                    }
-                    catch (...)
-                    {
-                    }
-                }
-                bool wasAbandoned;
-                {
-                    std::lock_guard<std::mutex> lock(outcome->m);
-                    outcome->done = true;
-                    wasAbandoned = outcome->abandoned;
-                }
-                if (wasAbandoned)
-                {
-                    gAbandonedFetches.fetch_sub(1);
-                }
-                outcome->cv.notify_one();
-            }).detach();
-
-            std::unique_lock<std::mutex> lock(outcome->m);
-            if (!outcome->cv.wait_for(lock, std::chrono::seconds(kFetchDeadlineSeconds), [&] { return outcome->done; }))
-            {
-                outcome->abandoned = true;
-                gAbandonedFetches.fetch_add(1);
-                fprintf(stderr, "[HTTP] %s%s did not finish within %ds, giving up on it (%d left running)\n",
-                    url.c_str(), path.c_str(), kFetchDeadlineSeconds, gAbandonedFetches.load());
-                fflush(stderr);
-            }
-            if (outcome->haveResult)
-            {
-                result = outcome->result;
-                resp = outcome->resp;
-            }
+        for (const auto& header : headers) {
+            req->addHeader(header.first, header.second);
         }
 
+        auto [result, resp] = client->sendRequest(req, 30.0);
         if (callback != nullptr)
         {
             callback(result, resp);

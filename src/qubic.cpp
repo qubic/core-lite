@@ -10921,8 +10921,6 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     new (&gRpcDispatchLock) SmartSharedMutex("gRpcDispatchLock");
     rpcUnixStart(rpcPath);
 #ifndef TESTNET
-    // Requests the parent left running did not survive the fork.
-    HttpUtils::gAbandonedFetches = 0;
     watchAndCheckin();
 #endif
 #endif
