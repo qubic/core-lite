@@ -31,6 +31,18 @@ from app.wipe_window import is_in_window
 logger = logging.getLogger(__name__)
 
 
+def epoch_file_urls(
+    snapshot_service_url: str, fallback_url: str, epoch: int
+) -> list[str]:
+    """Epoch archive URLs to try, in order: the snapshot service, then the fallback."""
+    urls = [f"{snapshot_service_url.rstrip('/')}/network/{epoch}/ep{epoch}-full.zip"]
+    if fallback_url:
+        fallback = fallback_url.replace("{epoch}", str(epoch))
+        if fallback not in urls:
+            urls.append(fallback)
+    return urls
+
+
 class Orchestrator:
     """Main orchestrator - runs as PID 1 in the Docker container."""
 
@@ -380,9 +392,10 @@ class Orchestrator:
         if self._config.force_download:
             logger.info("Force download enabled")
 
-        epoch_url = (
-            f"{self._config.snapshot_service_url}"
-            f"/network/{epoch}/ep{epoch}-full.zip"
+        epoch_urls = epoch_file_urls(
+            self._config.snapshot_service_url,
+            self._config.epoch_files_fallback_url,
+            epoch,
         )
 
         # Retry loop: try snapshot first, then epoch files
@@ -407,14 +420,19 @@ class Orchestrator:
                         "Snapshot download failed, trying epoch files"
                     )
 
-                # Try epoch files
-                logger.info(f"Downloading epoch files from: {epoch_url}")
-                success = await self._state_manager.download_epoch_files(
-                    epoch, epoch_url
-                )
-                if success and self._state_manager.has_valid_state_files(epoch):
-                    logger.info("Epoch files downloaded and validated")
-                    return
+                # Try epoch files, then the fallback source
+                for epoch_url in epoch_urls:
+                    logger.info(f"Downloading epoch files from: {epoch_url}")
+                    success = await self._state_manager.download_epoch_files(
+                        epoch, epoch_url
+                    )
+                    if success and self._state_manager.has_valid_state_files(epoch):
+                        logger.info("Epoch files downloaded and validated")
+                        return
+                    if epoch_url != epoch_urls[-1]:
+                        logger.warning(
+                            "Epoch files unusable, trying the next source"
+                        )
             except Exception as e:
                 logger.warning(f"Download attempt failed: {e}")
 
