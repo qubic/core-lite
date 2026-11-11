@@ -27,7 +27,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             key: linux-arm64
             release_file: Qubic-linux-arm64
-          - runner: macos-14
+          - runner: macos-15
             key: darwin-arm64
             arch: arm64
             release_file: Qubic-darwin-arm64
@@ -173,7 +173,7 @@ jobs:
           else
             echo "MACOS_DEPLOYMENT_TARGET=10.15" >> "$GITHUB_ENV"
           fi
-          echo "LIBFFI_VERSION=3.4.6" >> "$GITHUB_ENV"
+          echo "LIBFFI_VERSION=3.4.8" >> "$GITHUB_ENV"
           echo "LIBFFI_PREFIX=$RUNNER_TEMP/libffi-prefix" >> "$GITHUB_ENV"
         env:
           MATRIX_KEY: ${{ matrix.key }}
@@ -456,6 +456,10 @@ jobs:
         shell: bash
         run: |
           test "$(lipo -archs "$NODE_BIN")" = "$MATRIX_ARCH"
+          if [ "$(stat -f%z "$NODE_BIN")" -gt 104857600 ]; then
+            echo "::error::macOS node is over 100 MB: zero-filled statics are being written into the file"
+            exit 1
+          fi
           MIN_OS=$(otool -l "$NODE_BIN" | awk '
             $1 == "cmd" && ($2 == "LC_BUILD_VERSION" || $2 == "LC_VERSION_MIN_MACOSX") { found = 1 }
             found && ($1 == "minos" || $1 == "version") { print $2; exit }

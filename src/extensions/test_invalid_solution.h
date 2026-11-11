@@ -321,7 +321,7 @@ inline bool broadcastAntSolution(ColonyT& colony,
         nonce.setRandomValue();
         nonce.m256i_u8[0] = (unsigned char)score_engine::AlgoType::Bpp9000;
         const unsigned char changesPerStep = (unsigned char)(1 + (nonce.m256i_u8[1] % score_engine::BPP9000_MAX_CHANGES_PER_STEP));
-        const unsigned char mutationMode = (unsigned char)(score_engine::BPP9000_MODE_START + (nonce.m256i_u8[3] % 3));
+        const unsigned char mutationMode = score_engine::BPP9000_MODE_WIRING;
         nonce.m256i_u8[1] = (unsigned char)(changesPerStep | (mutationMode << 4));
         nonce.m256i_u8[2] = 0;   // no explore steps: pure descent gives the best odds of beating the parent
 

@@ -190,3 +190,13 @@ jobs:
               core-headers.tar.gz \
               qinit-manifest.json \
               --clobber
+      # a fixed-name release holding only the newest manifest, so a client's lookup never depends on which release github labels latest
+      - name: Point qinit-latest at this release
+        if: startsWith(github.ref, 'refs/tags/qinit-v')
+        working-directory: dist
+        run: |
+          gh release create qinit-latest qinit-manifest.json \
+            --title "latest qinit release pointer" \
+            --notes "Points clients to the newest published qinit release." \
+            --latest=false \
+            || gh release upload qinit-latest qinit-manifest.json --clobber

@@ -29,7 +29,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../src)
 include_directories(${PROJECT_ROOT_DIR})
 
 file(COPY data/example_task_bpp9000.bin data/samples_bpp9000.csv data/scores_bpp9000.csv
-     data/bpp9000.task data/gt_production.csv data/gt_ant_production.csv
+     data/bpp9000.task data/gt_production.csv data/gt_ant_production.csv data/gt_ant_positive.csv
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/data)
 
 add_executable(

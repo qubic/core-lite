@@ -1448,6 +1448,23 @@ public:
         VMBase();
     }
 
+    // A page restored from a snapshot lives in its .pg file or in a dumped cache slot.
+    bool holdsPage(unsigned long long pageId) const
+    {
+        if (pageId < MAX_PAGE && isPageWrittenToDisk[pageId])
+        {
+            return true;
+        }
+        for (unsigned long long slot = 0; slot <= numCachePage; slot++)
+        {
+            if (cachePageId[slot] == pageId)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     ~SwapVirtualMemory()
     {
 #if defined(__linux__)

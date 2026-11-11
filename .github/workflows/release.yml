@@ -5,6 +5,7 @@ on:
     tags:
       - "*"
       - "!qinit-v*"
+      - "!qinit-latest"
 
 env:
   RELEASE_BUILD_DIR: "build"

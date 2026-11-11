@@ -1075,7 +1075,7 @@ simde_mm512_cmp_epi16_mask (simde__m512i a, simde__m512i b, const int imm8)
 #if defined(SIMDE_X86_AVX512BW_NATIVE)
   #define simde_mm512_mask_cmp_epi16_mask(k1, a, b, imm8) _mm512_mask_cmp_epi16_mask(k1, a, b, imm8)
 #else
-  #define simde_mm512_mask_cmp_epi16_mask(k1, a, b, imm8) (k1) & simde_mm512_cmp_epi16_mask(a, b, imm8)
+  #define simde_mm512_mask_cmp_epi16_mask(k1, a, b, imm8) ((k1) & simde_mm512_cmp_epi16_mask(a, b, imm8))
 #endif
 #if defined(SIMDE_X86_AVX512BW_ENABLE_NATIVE_ALIASES)
   #undef _mm512_mask_cmp_epi16_mask
@@ -1382,7 +1382,7 @@ simde_mm512_cmp_epu16_mask (simde__m512i a, simde__m512i b, const int imm8)
 #if defined(SIMDE_X86_AVX512BW_NATIVE)
   #define simde_mm512_mask_cmp_epu16_mask(k1, a, b, imm8) _mm512_mask_cmp_epu16_mask(k1, a, b, imm8)
 #else
-  #define simde_mm512_mask_cmp_epu16_mask(k1, a, b, imm8) (k1) & simde_mm512_cmp_epu16_mask(a, b, imm8)
+  #define simde_mm512_mask_cmp_epu16_mask(k1, a, b, imm8) ((k1) & simde_mm512_cmp_epu16_mask(a, b, imm8))
 #endif
 #if defined(SIMDE_X86_AVX512BW_ENABLE_NATIVE_ALIASES)
   #undef _mm512_mask_cmp_epu16_mask
@@ -1491,7 +1491,7 @@ simde_mm256_cmp_epu32_mask (simde__m256i a, simde__m256i b, const int imm8)
 #if defined(SIMDE_X86_AVX512F_NATIVE) && defined(SIMDE_X86_AVX512VL_NATIVE)
   #define simde_mm256_mask_cmp_epu32_mask(k1, a, b, imm8) _mm256_mask_cmp_epu32_mask(k1, a, b, imm8)
 #else
-  #define simde_mm256_mask_cmp_epu32_mask(k1, a, b, imm8) (k1) & simde_mm256_cmp_epu32_mask((a), (b), (imm8))
+  #define simde_mm256_mask_cmp_epu32_mask(k1, a, b, imm8) ((k1) & simde_mm256_cmp_epu32_mask((a), (b), (imm8)))
 #endif
 #if defined(SIMDE_X86_AVX512F_ENABLE_NATIVE_ALIASES) && defined(SIMDE_X86_AVX512VL_ENABLE_NATIVE_ALIASES)
   #undef _mm256_mask_cmp_epu32_mask
@@ -1600,7 +1600,7 @@ simde_mm512_cmp_epu32_mask (simde__m512i a, simde__m512i b, const int imm8)
 #if defined(SIMDE_X86_AVX512F_NATIVE)
   #define simde_mm512_mask_cmp_epu32_mask(k1, a, b, imm8) _mm512_mask_cmp_epu32_mask(k1, a, b, imm8)
 #else
-  #define simde_mm512_mask_cmp_epu32_mask(k1, a, b, imm8) (k1) & simde_mm512_cmp_epu32_mask(a, b, imm8)
+  #define simde_mm512_mask_cmp_epu32_mask(k1, a, b, imm8) ((k1) & simde_mm512_cmp_epu32_mask(a, b, imm8))
 #endif
 #if defined(SIMDE_X86_AVX512F_ENABLE_NATIVE_ALIASES)
   #undef _mm512_mask_cmp_epu32_mask
@@ -1709,7 +1709,7 @@ simde_mm512_cmp_epu64_mask (simde__m512i a, simde__m512i b, const int imm8)
 #if defined(SIMDE_X86_AVX512F_NATIVE)
   #define simde_mm512_mask_cmp_epu64_mask(k1, a, b, imm8) _mm512_mask_cmp_epu64_mask(k1, a, b, imm8)
 #else
-  #define simde_mm512_mask_cmp_epu64_mask(k1, a, b, imm8) (k1) & simde_mm512_cmp_epu64_mask(a, b, imm8)
+  #define simde_mm512_mask_cmp_epu64_mask(k1, a, b, imm8) ((k1) & simde_mm512_cmp_epu64_mask(a, b, imm8))
 #endif
 #if defined(SIMDE_X86_AVX512F_ENABLE_NATIVE_ALIASES)
   #undef _mm512_mask_cmp_epu64_mask
