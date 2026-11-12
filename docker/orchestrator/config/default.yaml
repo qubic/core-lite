@@ -12,6 +12,7 @@ log_format: "json"        # "json" or "text"
 # External services
 epoch_api_url: "https://api.qubic.li/public/EpochInfo"
 snapshot_service_url: "https://storage.qubic.li"
+epoch_files_fallback_url: "https://dl.qubic.global/ep{epoch}.zip"
 force_download: false
 
 # Management API

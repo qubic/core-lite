@@ -4110,9 +4110,19 @@ static void processTickTransactionAntColonySolution(
     const AntColonyBpp9000T::Ann* childAnn = nullptr;
     if (trustClaimedScore)
     {
+        // The scorer rejects these before any walk, so the quorum refunds none of them. Taken on trust,
+        // one of them would be refunded here and nowhere else, and every trusting node would diverge.
+        const unsigned int parentShift = (parentRec != nullptr) ? parentRec->shift : 0u;
+        if (!score_engine::ScoreEngineT::isCanonicalAntNonce(transaction->nonce.m256i_u8)
+            || parentShift > score_engine::ScoreBpp9000T::shiftCap)
+        {
+            gAntColony.recordReject(ValidityResult::RejectNonCanonicalNonce);
+            logAntSolutionOutcome(transaction, 0, ValidityResult::RejectNonCanonicalNonce);
+            return;
+        }
         // Only the walk yields the shift and the claim carries none; the parent's is the lowest it can be.
         childRating.error = transaction->claimedScore;
-        childRating.shift = (parentRec != nullptr) ? parentRec->shift : 0u;
+        childRating.shift = parentShift;
     }
     else if (gAntScoredReady[transactionIndex])
     {
@@ -10921,6 +10931,8 @@ static void tickForkChildPromote(unsigned int strictUntilTick)
     new (&gRpcDispatchLock) SmartSharedMutex("gRpcDispatchLock");
     rpcUnixStart(rpcPath);
 #ifndef TESTNET
+    // Requests the parent left running did not survive the fork.
+    HttpUtils::gAbandonedFetches = 0;
     watchAndCheckin();
 #endif
 #endif
