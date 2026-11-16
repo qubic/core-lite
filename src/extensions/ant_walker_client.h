@@ -289,7 +289,6 @@ inline bool sendHello(int fd)
     gState.helloGeneration = hello.epochId;
     copyMem(hello.miningSeed, score->currentRandomSeed.m256i_u8, 32);
     copyMem(hello.topologyHash, BPP9000_TOPOLOGY_HASH, 32);
-    copyMem(hello.dataHash, BPP9000_DATA_HASH, 32);
     return sendFrame(fd, AntWalkProto::MsgHello, &hello, (unsigned int)sizeof(hello));
 }
 
@@ -407,6 +406,17 @@ inline bool dispatchOne()
         return false;
     }
     copyMem(job.anchorDigest, anchorDigest.m256i_u8, 32);
+
+    // Graded on the hours its own anchor tick could see, like every node that walked it.
+    unsigned int shiftLimit = 0;
+    unsigned int baseHour = 0;
+    job.targetCount = gBtcPriceFeed.taskDataAt(record->anchorTick, job.targets, (unsigned int)BPP9000_SEQUENCE_LENGTH,
+        shiftLimit, baseHour);
+    if (job.targetCount == 0)
+    {
+        gAntColony.releaseAnnClaim(index);
+        return false;
+    }
 
     // Every other scoring path memoises its walk, so a score already held here costs no job at all.
     const AntColonyBpp9000T::ReplayKey replayKey = makeAntReplayKey(record->pubkey, record->nonce, record->parentRef, anchorDigest);
