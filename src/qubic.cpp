@@ -7964,6 +7964,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
     // only init first tick if it doesn't load all node states from file
     if (!loadAllNodeStateFromFile && !tickFork::gIsForkChild)
     {
+        PinScope _pinScope; // runs before the loop's PinScope, so release its ticks page pin here
         initializeFirstTick();
     }
 #endif
