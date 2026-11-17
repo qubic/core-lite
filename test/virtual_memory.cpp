@@ -909,6 +909,35 @@ TEST(TestSwapVirtualMemory, PinsHeldByThisThreadTracksScopeAndReset) {
     EXPECT_EQ(tlPinArena.count, 0);
 }
 
+// A nested scope releases only its own pin and keeps the enclosing scope's pins.
+TEST(TestSwapVirtualMemory, NestedScopeReleasesTransientPinKeepsOuter) {
+    initFilesystem();
+    registerAsynFileIO(NULL);
+    tlPinArena.count = 0;
+    SwapVirtualMemory<E16, wcharToNumber(L"pnns"), wcharToNumber(L"data"), 256, 4, INDEX_MODE, 0> vm;
+    vm.init();
+    {
+        PinScope unit;
+        vm.getRef(0).a = 7; // held for the whole unit
+        for (unsigned long long p = 1; p < 32; p++) {
+            PinScope lookup;
+            vm.getRef(p * 256).a = p;
+            EXPECT_EQ(vm.getPinnedNow(), 2);
+        }
+        EXPECT_EQ(vm.getPinnedNow(), 1);
+        EXPECT_EQ(vm.getPinsHeldByThisThread(), 1);
+        // Re-reading the unit's own page in a nested scope dedups, so it must not drop the outer pin.
+        {
+            PinScope lookup;
+            EXPECT_EQ(vm.getRef(0).a, 7);
+        }
+        EXPECT_EQ(vm.getPinnedNow(), 1);
+        EXPECT_EQ(vm.getAllPinnedWaits(), 0ULL);
+    }
+    EXPECT_EQ(vm.getPinnedNow(), 0);
+    EXPECT_EQ(tlPinArena.count, 0);
+}
+
 // A releaseThreadPins() inside a scope (beginEpoch does this on the tick processor) must not leave the
 // pins the scope takes afterwards stranded below its savepoint.
 TEST(TestSwapVirtualMemory, ScopeReleasesPinsTakenAfterDrain) {

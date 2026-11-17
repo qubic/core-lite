@@ -694,6 +694,7 @@ static void computeAntAnchorDigest(unsigned int tick, const m256i& transactionDi
 // Tick storage keeps the whole epoch; only non-empty ticks recorded an anchor, which this reproduces.
 static bool recomputeAntAnchorDigest(unsigned int tick, m256i& out)
 {
+    PinScope _pinScope; // drop the page pin on return, else rebuild walks pile them up until the swap cache is fully pinned
     m256i anchorTxDigest;
     ts.tickData.acquireLock();
     const TickData* storedTickData = ts.tickData.getByTickIfNotEmpty(tick);
@@ -7963,6 +7964,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
     // only init first tick if it doesn't load all node states from file
     if (!loadAllNodeStateFromFile && !tickFork::gIsForkChild)
     {
+        PinScope _pinScope; // runs before the loop's PinScope, so release its ticks page pin here
         initializeFirstTick();
     }
 #endif
