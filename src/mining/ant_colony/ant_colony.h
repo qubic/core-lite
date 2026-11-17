@@ -6,6 +6,7 @@
 #include "platform/m256.h"
 #include "platform/memory.h"
 #include "platform/memory_util.h"
+#include "platform/processor_count.h"
 #include "kangaroo_twelve.h"
 #include "platform/file_io.h"
 #include "platform/debugging.h"
@@ -1616,9 +1617,34 @@ inline bool AntColony<ScoreT>::loadSnapshot(unsigned short epoch, CHAR16* direct
 template<typename ScoreT>
 inline bool AntColony<ScoreT>::rebuildDerivedState()
 {
-    // Hoisted out of the loop: unpacking each stored network to verify its hash needs somewhere to
-    // put it, and this path runs once at boot.
-    Ann annBuffer;
+    // Re-derive the hash of every stored network. An unmaterialised record has none yet, and gets
+    // its hash when the walk that builds one publishes it. This is most of the load on a full pool
+    // and, unlike the pass below, has no order, so it runs on every processor.
+    std::atomic<unsigned int> mismatchedRecord{ _solutionCount };
+    runOnAllProcessors(_solutionCount, 256, [&](unsigned long long first, unsigned long long last)
+    {
+        Ann annBuffer;
+        for (unsigned int i = (unsigned int)first; i < last; i++)
+        {
+            const AntSolutionRecord& rec = _records[i];
+            if (rec.annStateSlot != i)
+            {
+                continue;
+            }
+            ScoreT::load(_annPool[i], annBuffer);
+            unsigned int annHash;
+            KangarooTwelve(&annBuffer, sizeof(annBuffer), &annHash, sizeof(annHash));
+            if (annHash != rec.childAnnHash)
+            {
+                mismatchedRecord.store(i);
+            }
+        }
+    });
+    if (mismatchedRecord.load() < _solutionCount)
+    {
+        antSnapshotFailure(L"stored network does not match childAnnHash, record", mismatchedRecord.load(), 0);
+        return false;
+    }
 
     for (unsigned int i = 0; i < _solutionCount; i++)
     {
@@ -1719,20 +1745,6 @@ inline bool AntColony<ScoreT>::rebuildDerivedState()
         {
             antSnapshotFailure(L"score does not beat the parent, record/score", i, rec.score);
             return false;
-        }
-
-        // Re-derive the hash from the stored network. An unmaterialised record has none yet, and
-        // gets its hash when the walk that builds one publishes it.
-        if (annMaterialised)
-        {
-            ScoreT::load(_annPool[i], annBuffer);
-            unsigned int annHash;
-            KangarooTwelve(&annBuffer, sizeof(annBuffer), &annHash, sizeof(annHash));
-            if (annHash != rec.childAnnHash)
-            {
-                antSnapshotFailure(L"stored network does not match childAnnHash, record", i, 0);
-                return false;
-            }
         }
 
         const AntDedupKey key{ rec.pubkey, rec.nonce, rec.parentRef };
