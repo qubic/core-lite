@@ -489,6 +489,41 @@ inline void* qVirtualAlloc(const unsigned long long size, bool commitMem = false
     return nullptr;
 }
 
+#if defined(__linux__)
+#include <sys/vfs.h>
+#include <linux/magic.h>
+
+// Pool backed by an unlinked file in the working directory, so the kernel can evict its pages.
+// zeroPool() must not be used on it: the recommit would turn the range into anonymous memory.
+inline void* qVirtualAllocFileBacked(const unsigned long long size)
+{
+    char path[] = "./qubic_pool.XXXXXX";
+    const int fd = mkstemp(path);
+    if (fd < 0)
+    {
+        return nullptr;
+    }
+    unlink(path);
+
+    void* address = MAP_FAILED;
+    struct statfs fileSystem;
+    // tmpfs pages are RAM, so a pool there gains nothing. Space is reserved up front because a
+    // hole that cannot be filled on a full disk faults with SIGBUS.
+    if (fstatfs(fd, &fileSystem) == 0 && fileSystem.f_type != TMPFS_MAGIC && fallocate(fd, 0, 0, (off_t)size) == 0)
+    {
+        address = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    }
+    close(fd);
+    if (address == MAP_FAILED)
+    {
+        return nullptr;
+    }
+
+    registerVirtualMapping(address, size, true, false);
+    return address;
+}
+#endif
+
 inline void qVirtualAdviseNoHugePages(void* address, const unsigned long long size)
 {
     std::lock_guard<SmartMutex> lk(commitMemMapLock);

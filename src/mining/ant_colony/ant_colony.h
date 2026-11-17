@@ -695,7 +695,7 @@ inline bool AntColony<ScoreT>::init()
     {
         return false;
     }
-    if (!allocPoolWithErrorLog(L"AntColony::_annPool",
+    if (!allocFileBackedPoolWithErrorLog(L"AntColony::_annPool",
         ANT_ANN_POOL_BYTES, (void**)&_annPool, __LINE__))
     {
         return false;

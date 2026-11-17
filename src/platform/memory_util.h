@@ -21,6 +21,9 @@ inline bool qVirtualFreeAndRecommit(void* address, const unsigned long long size
 inline bool qVirtualContains(const void* address, const unsigned long long size);
 // Opt a mapping out of transparent huge pages (Linux); no-op elsewhere.
 inline void qVirtualAdviseNoHugePages(void* address, const unsigned long long size);
+#if defined(__linux__)
+inline void* qVirtualAllocFileBacked(const unsigned long long size);
+#endif
 #ifdef _MSC_VER
 // Reserve memory and commit pages on first touch.
 inline void* qVirtualAllocLazy(const unsigned long long size);
@@ -110,6 +113,24 @@ static bool allocSparsePoolWithErrorLog(const wchar_t* name, const unsigned long
     return true;
 }
 
+// For append-only pools that outgrow RAM: the kernel can evict file pages, not anonymous ones.
+static bool allocFileBackedPoolWithErrorLog(const wchar_t* name, const unsigned long long size, void** buffer, const int LINE)
+{
+// A forced epoch switch can reset the colony inside a fork window, which a shared pool cannot undo.
+#if defined(__linux__) && defined(USE_SWAP) && !defined(LONG_RUN_LOCAL_TESTNET)
+    *buffer = qVirtualAllocFileBacked(size + DEMAND_ZERO_POOL_SLACK);
+    CHAR16 line[256];
+    setText(line, *buffer != nullptr ? L"File-backed pool: " : L"No file-backed pool, using anonymous memory: ");
+    appendText(line, name);
+    logToConsole(line);
+    if (*buffer != nullptr)
+    {
+        return true;
+    }
+#endif
+    return allocPoolWithErrorLog(name, size, buffer, LINE);
+}
+
 // Zero a range of a pool. Inside a demand-zero mapping the pages go back to the kernel instead of
 // being written, so the range stops costing RSS; anything else is memset.
 static void zeroPool(void* buffer, const unsigned long long size)
@@ -162,6 +183,11 @@ static bool allocPoolWithErrorLog(const CHAR16* name, const unsigned long long s
 }
 
 static bool allocSparsePoolWithErrorLog(const CHAR16* name, const unsigned long long size, void** buffer, const int LINE)
+{
+    return allocPoolWithErrorLog(name, size, buffer, LINE);
+}
+
+static bool allocFileBackedPoolWithErrorLog(const CHAR16* name, const unsigned long long size, void** buffer, const int LINE)
 {
     return allocPoolWithErrorLog(name, size, buffer, LINE);
 }
