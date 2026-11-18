@@ -136,6 +136,27 @@ add_executable(
 )
 set_target_properties(Qubic PROPERTIES SKIP_BUILD_RPATH TRUE)
 
+# Keep the tracked header used by native MSBuild byte-for-byte in sync with
+# the bootstrap file without rewriting the source tree during normal builds.
+set(BTC_PRICE_BOOTSTRAP_FILE ${CMAKE_SOURCE_DIR}/data/btc_price_bootstrap.bin)
+set(BTC_PRICE_BOOTSTRAP_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/extensions/btc_price_bootstrap.generated.h)
+add_custom_target(
+    btc_price_bootstrap_check
+    COMMAND ${CMAKE_COMMAND}
+            -DINPUT_FILE=${BTC_PRICE_BOOTSTRAP_FILE}
+            -DOUTPUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/btc_price_bootstrap.generated.h
+            -DEXPECTED_FILE=${BTC_PRICE_BOOTSTRAP_HEADER}
+            -DSYMBOL=BTC_PRICE_BOOTSTRAP
+            -P ${CMAKE_SOURCE_DIR}/cmake/EmbedBinary.cmake
+    DEPENDS
+            ${BTC_PRICE_BOOTSTRAP_FILE}
+            ${BTC_PRICE_BOOTSTRAP_HEADER}
+            ${CMAKE_SOURCE_DIR}/cmake/EmbedBinary.cmake
+    COMMENT "Checking embedded BTC price bootstrap"
+    VERBATIM
+)
+add_dependencies(Qubic btc_price_bootstrap_check)
+
 # Explorer asset bundling: regen embedded header when HTML/CSS/JS change.
 if(NOT WIN32)
     set(EXPLORER_ASSETS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extensions/http/static/explorer)

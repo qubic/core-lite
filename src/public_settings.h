@@ -115,12 +115,12 @@ static_assert(AUTO_FORCE_NEXT_TICK_THRESHOLD* TARGET_TICK_DURATION >= PEER_REFRE
 // Config options that should NOT be changed by operators
 
 #define VERSION_A 1
-#define VERSION_B 312
+#define VERSION_B 313
 #define VERSION_C 0
 
 // Epoch and initial tick for node startup
-#define EPOCH 239
-#define TICK 91688000
+#define EPOCH 240
+#define TICK 91910000
 #define TICK_IS_FIRST_TICK_OF_EPOCH 1 // Set to 0 if the network is restarted during the EPOCH with a new initial TICK
 
 #define ARBITRATOR "AFZPUAIYVPNUYGJRQVLUKOPPVLHAZQTGLYAAUUNBXFTVTAMSBKQBLEIEPCVJ"
@@ -187,10 +187,10 @@ static wchar_t BTC_PRICE_SERIES_SNAPSHOT_FILE_NAME[] = L"snapshotBtcPriceSeries.
 static wchar_t BTC_PRICE_BOOTSTRAP_FILE_NAME[] = L"btc_price_bootstrap.bin";
 // K12 of the bootstrap file.
 static constexpr unsigned char BTC_PRICE_BOOTSTRAP_HASH[32] =
-    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    { 0x1e, 0x14, 0x49, 0xc3, 0xf7, 0xd8, 0x02, 0x52, 0xf0, 0xaa, 0xf5, 0x33, 0x6b, 0x2c, 0x6a, 0x05,
+      0x79, 0xb7, 0x26, 0x76, 0x97, 0xcc, 0xa2, 0x80, 0x0e, 0x20, 0x1c, 0x80, 0x84, 0x9f, 0xe5, 0x46 };
 // Lowest hour a free feed query may ask for.
-static constexpr unsigned int BTC_FEED_MIN_HOUR = 31223;
+static constexpr unsigned int BTC_FEED_MIN_HOUR = 31363;
 // The leader of every BTC_FEED_SLOT_PERIOD-th tick may send one free feed query.
 static constexpr unsigned int BTC_FEED_SLOT_PERIOD = 5;
 // One step of the price series: an hour on mainnet.

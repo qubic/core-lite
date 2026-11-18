@@ -1,9 +1,12 @@
 #pragma once
 
-// Lite glue around the bpp9000 BTC price feed: a synthetic testnet series, the shift limit an anchor allows,
-// and a one-shot check that this node's series matches the quorum's.
+// Lite glue around the bpp9000 BTC price feed: the embedded bootstrap, a synthetic testnet series, the shift limit an
+// anchor allows, and a one-shot check that this node's series matches the quorum's.
 
 #include "mining/price_feed.h"
+#include "extensions/btc_price_bootstrap.generated.h"
+
+static_assert(BTC_PRICE_BOOTSTRAP_SIZE == sizeof(BtcPriceImage), "embedded bootstrap is not a price image");
 
 // Set after a start from files until the first quorum digest has been compared; trust waits for it.
 static bool gBtcSeriesCheckPending = false;
@@ -51,6 +54,15 @@ static void loadSyntheticBtcPriceSeries(unsigned short epoch, unsigned int initi
     logToConsole(L"BTC price series synthesized for testnet");
 }
 #endif
+
+// The bootstrap ships inside the binary; the loader reads it from disk and accepts only the pinned hash.
+static void writeEmbeddedBtcPriceBootstrap()
+{
+    if (save(BTC_PRICE_BOOTSTRAP_FILE_NAME, BTC_PRICE_BOOTSTRAP_SIZE, BTC_PRICE_BOOTSTRAP_BYTES, NULL) != (long long)BTC_PRICE_BOOTSTRAP_SIZE)
+    {
+        logToConsole(L"Failed to write the embedded BTC price bootstrap!");
+    }
+}
 
 // Shift limit of a solution anchored at anchorTick. False without a price series.
 static bool antShiftLimitAt(unsigned int anchorTick, unsigned int& shiftLimit)
