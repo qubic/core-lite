@@ -97,6 +97,7 @@ add_executable(
 		setjump.cpp
 		oc_engine.cpp
 		oracle_engine.cpp
+		price_feed.cpp
 		windows_lazy_memory.cpp
 )
 
