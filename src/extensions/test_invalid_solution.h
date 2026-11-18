@@ -143,7 +143,7 @@ enum class AntInjectMode
     WrongTree,      // parent belonging to another identity
     Stale,          // anchor older than the publish window
     FutureParent,   // parent ref into the current tick
-    LeParent,       // child that does not beat its parent
+    LeParent,       // child that does not beat its parent on the anchor's data: no score, deposit kept
 };
 
 namespace detail
@@ -314,6 +314,18 @@ inline bool broadcastAntSolution(ColonyT& colony,
 
     // A root parent sits at frame 0.
     const unsigned int parentShift = (parentRec != nullptr) ? parentRec->shift : 0u;
+
+    // Graded on the hours the anchor tick could see, as every node will grade it.
+    static unsigned char targets[BPP9000_SEQUENCE_LENGTH];
+    unsigned int shiftLimit = 0;
+    unsigned int baseHour = 0;
+    const unsigned int targetCount =
+        gBtcPriceFeed.taskDataAt(usedAnchorTick, targets, (unsigned int)BPP9000_SEQUENCE_LENGTH, shiftLimit, baseHour);
+    if (targetCount == 0)
+    {
+        return false;
+    }
+
     score_engine::Rating childRating = score_engine::Rating::worst();
     bool found = false;
     for (unsigned int attempt = 0; attempt < attempts && !found; attempt++)
@@ -326,8 +338,8 @@ inline bool broadcastAntSolution(ColonyT& colony,
         nonce.m256i_u8[2] = 0;   // no explore steps: pure descent gives the best odds of beating the parent
 
         const unsigned long long walkStart = __rdtsc();
-        childRating = scoreFn.computeAntChildScore(processorNumber, parentAnnPtr, parentShift, minerKey, nonce,
-                                                   anchorDigest, childAnn);
+        childRating = scoreFn.computeAntChildScore(processorNumber, parentAnnPtr, parentShift, targets, targetCount,
+                                                   minerKey, nonce, anchorDigest, childAnn);
         {
             CHAR16 line[224];
             setText(line, L"ANT-INJECT attempt score=");
@@ -344,17 +356,21 @@ inline bool broadcastAntSolution(ColonyT& colony,
             appendNumber(line, (__rdtsc() - walkStart) / (frequency / 1000), FALSE);
             logToConsole(line);
         }
+        // The scorer refuses a child that does not beat a stored parent on the anchor's data, so that refusal
+        // is the LeParent case; a root child is exempt, seed a real parent first.
         if (!childRating.isValid())
+        {
+            found = (mode == AntInjectMode::LeParent && parentRec != nullptr);
+            continue;
+        }
+        if (mode == AntInjectMode::LeParent)
         {
             continue;
         }
 
         const bool beatsParent = childRating.isBetterThan(parentRating);
         const bool clearsThreshold = childRating.clearsFloor(colony.errorThreshold());
-        // Every walk beats the root's WORST_SCORE, so LeParent is unreachable until the identity has a real parent: seed one first.
-        found = (mode == AntInjectMode::LeParent && parentRec != nullptr)
-            ? (clearsThreshold && !beatsParent)
-            : (beatsParent && clearsThreshold);
+        found = beatsParent && clearsThreshold;
     }
 
     if (!found)
@@ -364,8 +380,16 @@ inline bool broadcastAntSolution(ColonyT& colony,
 
     // BadClaim keeps the honest nonce so the node's recompute succeeds and then disagrees, which is
     // what forfeits the deposit.
-    const unsigned int claimedScore =
-        (mode == AntInjectMode::BadClaim) ? (childRating.error + 1) : childRating.error;
+    // LeParent claims the parent's score: a trusting node accepts it, a computing one has no score to refund.
+    unsigned int claimedScore = childRating.error;
+    if (mode == AntInjectMode::BadClaim)
+    {
+        claimedScore = childRating.error + 1;
+    }
+    else if (mode == AntInjectMode::LeParent)
+    {
+        claimedScore = parentRating.error;
+    }
 
     const unsigned int publishTick = system.tick + ANT_INJECT_PUBLICATION_OFFSET;
     detail::signAndBroadcastAntSolution(computorIdx, parentRef, usedAnchorTick, claimedScore, nonce, publishTick);

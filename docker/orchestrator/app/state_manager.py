@@ -546,6 +546,8 @@ class StateManager:
             f"contract*.{epoch}",
             f"score.{epoch}",
             f"custom_mining_cache.{epoch}",
+            f"btcPriceSeries.{epoch}",
+            "btc_price_bootstrap.bin",
             "system",
         ]:
             files.extend(self._data_dir.glob(pattern))

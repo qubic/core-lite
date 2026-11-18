@@ -6,6 +6,7 @@
 #include "platform/m256.h"
 #include "platform/memory.h"
 #include "platform/memory_util.h"
+#include "platform/processor_count.h"
 #include "kangaroo_twelve.h"
 #include "platform/file_io.h"
 #include "platform/debugging.h"
@@ -151,7 +152,9 @@ enum ValidityResult
     RejectReplay,                // (pubkey, parentRef, nonce) already committed this epoch
     RejectDedupFull,
     RejectMinerIndexFull,        // more than MAX_NUMBER_OF_MINERS identities hold a tree this epoch
-    RejectNonCanonicalNonce,     // scorer refused the nonce; no score was produced
+    RejectNonCanonicalNonce,     // no score: nonce refused, walk timed out, the child's data does not reach its
+                                 // parent's shift, or the child does not beat its parent rated on that data
+    SkippedSupersededInTick,     // the sender has another solution at a higher index in the same tick; not looked at, refunded
 };
 
 struct AntColonyDiagnostics
@@ -167,6 +170,7 @@ struct AntColonyDiagnostics
     unsigned long long rejectDedupFull;
     unsigned long long rejectMinerIndexFull;
     unsigned long long rejectNonCanonicalNonce;
+    unsigned long long skippedSupersededInTick;
 
     unsigned long long acceptedSolutions;
     unsigned long long acceptedNotStored;
@@ -214,6 +218,8 @@ struct AntColonyDiagnostics
         appendNumber(message, rejectMinerIndexFull, TRUE);
         appendText(message, L", nonCanonicalNonce ");
         appendNumber(message, rejectNonCanonicalNonce, TRUE);
+        appendText(message, L" | skipped (later one in the tick) ");
+        appendNumber(message, skippedSupersededInTick, TRUE);
     }
 
     void count(ValidityResult r)
@@ -231,6 +237,7 @@ struct AntColonyDiagnostics
         case ValidityResult::RejectDedupFull:           rejectDedupFull++; break;
         case ValidityResult::RejectMinerIndexFull:      rejectMinerIndexFull++; break;
         case ValidityResult::RejectNonCanonicalNonce:   rejectNonCanonicalNonce++; break;
+        case ValidityResult::SkippedSupersededInTick:   skippedSupersededInTick++; break;
         default: break;
         }
     }
@@ -412,7 +419,7 @@ public:
 
     // Writes the ANT_EXPORT_MAX_SOLUTIONS lowest-scoring networks of the epoch to a file for offline
     // extraction. MUST be called between endEpoch() and the reset that starts the next epoch
-    bool exportBestSolutions(unsigned short epoch, CHAR16* directory);
+    bool exportBestSolutions(unsigned short epoch, CHAR16* directory, const unsigned char* taskDataHash);
 
     // Children already recorded under this parent, capped at ANT_MAX_CHILDREN_PER_PARENT, for query
     // purposes. Off-thread safe: the head map is read under the lock, the chain walk after it is not.
@@ -695,7 +702,7 @@ inline bool AntColony<ScoreT>::init()
     {
         return false;
     }
-    if (!allocPoolWithErrorLog(L"AntColony::_annPool",
+    if (!allocFileBackedPoolWithErrorLog(L"AntColony::_annPool",
         ANT_ANN_POOL_BYTES, (void**)&_annPool, __LINE__))
     {
         return false;
@@ -981,7 +988,7 @@ struct AntColonyExportHeader
     unsigned int solutionCount;      // the whole epoch, of which entryCount are exported
     unsigned int errorThreshold;
     unsigned char topologyHash[32];  // == BPP9000_TOPOLOGY_HASH of the build that wrote this
-    unsigned char dataHash[32];      // == BPP9000_DATA_HASH
+    unsigned char dataHash[32];      // of the first frame
     m256i rootSeed;
 };
 static_assert(sizeof(AntColonyExportHeader) == 24 + 64 + 32, "AntColonyExportHeader unexpected padding");
@@ -999,7 +1006,7 @@ struct AntColonyExportEntry
 static_assert(sizeof(AntColonyExportEntry) == 32 + 16, "AntColonyExportEntry unexpected padding");
 
 template<typename ScoreT>
-inline bool AntColony<ScoreT>::exportBestSolutions(unsigned short epoch, CHAR16* directory)
+inline bool AntColony<ScoreT>::exportBestSolutions(unsigned short epoch, CHAR16* directory, const unsigned char* taskDataHash)
 {
     ASSERT(_exportSet != nullptr);
 
@@ -1019,7 +1026,7 @@ inline bool AntColony<ScoreT>::exportBestSolutions(unsigned short epoch, CHAR16*
     header.solutionCount = _solutionCount;
     header.errorThreshold = _errorThreshold;
     copyMem(header.topologyHash, BPP9000_TOPOLOGY_HASH, sizeof(header.topologyHash));
-    copyMem(header.dataHash, BPP9000_DATA_HASH, sizeof(header.dataHash));
+    copyMem(header.dataHash, taskDataHash, sizeof(header.dataHash));
     header.rootSeed = _rootSeed;
 
     if (set.count == 0)
@@ -1616,9 +1623,34 @@ inline bool AntColony<ScoreT>::loadSnapshot(unsigned short epoch, CHAR16* direct
 template<typename ScoreT>
 inline bool AntColony<ScoreT>::rebuildDerivedState()
 {
-    // Hoisted out of the loop: unpacking each stored network to verify its hash needs somewhere to
-    // put it, and this path runs once at boot.
-    Ann annBuffer;
+    // Re-derive the hash of every stored network. An unmaterialised record has none yet, and gets
+    // its hash when the walk that builds one publishes it. This is most of the load on a full pool
+    // and, unlike the pass below, has no order, so it runs on every processor.
+    std::atomic<unsigned int> mismatchedRecord{ _solutionCount };
+    runOnAllProcessors(_solutionCount, 256, [&](unsigned long long first, unsigned long long last)
+    {
+        Ann annBuffer;
+        for (unsigned int i = (unsigned int)first; i < last; i++)
+        {
+            const AntSolutionRecord& rec = _records[i];
+            if (rec.annStateSlot != i)
+            {
+                continue;
+            }
+            ScoreT::load(_annPool[i], annBuffer);
+            unsigned int annHash;
+            KangarooTwelve(&annBuffer, sizeof(annBuffer), &annHash, sizeof(annHash));
+            if (annHash != rec.childAnnHash)
+            {
+                mismatchedRecord.store(i);
+            }
+        }
+    });
+    if (mismatchedRecord.load() < _solutionCount)
+    {
+        antSnapshotFailure(L"stored network does not match childAnnHash, record", mismatchedRecord.load(), 0);
+        return false;
+    }
 
     for (unsigned int i = 0; i < _solutionCount; i++)
     {
@@ -1719,20 +1751,6 @@ inline bool AntColony<ScoreT>::rebuildDerivedState()
         {
             antSnapshotFailure(L"score does not beat the parent, record/score", i, rec.score);
             return false;
-        }
-
-        // Re-derive the hash from the stored network. An unmaterialised record has none yet, and
-        // gets its hash when the walk that builds one publishes it.
-        if (annMaterialised)
-        {
-            ScoreT::load(_annPool[i], annBuffer);
-            unsigned int annHash;
-            KangarooTwelve(&annBuffer, sizeof(annBuffer), &annHash, sizeof(annHash));
-            if (annHash != rec.childAnnHash)
-            {
-                antSnapshotFailure(L"stored network does not match childAnnHash, record", i, 0);
-                return false;
-            }
         }
 
         const AntDedupKey key{ rec.pubkey, rec.nonce, rec.parentRef };

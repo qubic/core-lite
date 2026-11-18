@@ -9,7 +9,7 @@
 namespace AntWalkProto
 {
 static constexpr unsigned int MAGIC = 0x57544E41u;   // "ANTW"
-static constexpr unsigned int VERSION = 2;
+static constexpr unsigned int VERSION = 3;
 
 static constexpr unsigned int ANN_BYTES = (unsigned int)sizeof(score_engine::ScoreBpp9000T::ANN);
 
@@ -80,10 +80,8 @@ struct HelloPayload
     unsigned int annBytes;
     unsigned int configHash;
     unsigned char miningSeed[32];
-    // The pinned task identity both binaries were compiled against; a mismatch means the two would
-    // score the same nonce differently, which is worth refusing before a single job runs.
+    // The wiring identity both binaries were compiled against; task targets travel with each job.
     unsigned char topologyHash[32];
-    unsigned char dataHash[32];
 };
 
 struct ReadyPayload
@@ -102,10 +100,11 @@ struct JobPayload
     unsigned int epochId;
     unsigned int isRoot;             // parentAnn is unused when set; the walker derives the identity's root
     unsigned int parentShift;        // frame the parent reached; the walk starts there
-    unsigned int reserved;
+    unsigned int targetCount;        // first frame plus the hours the anchor tick could see
     unsigned char pubkey[32];
     unsigned char nonce[32];
     unsigned char anchorDigest[32];
+    unsigned char targets[BPP9000_SEQUENCE_LENGTH];
     unsigned char parentAnn[ANN_BYTES];
 };
 
@@ -120,9 +119,9 @@ struct ResultPayload
 };
 
 static_assert(sizeof(FrameHeader) == 16, "FrameHeader must stay 16 bytes on the wire");
-static_assert(sizeof(HelloPayload) == 112, "HelloPayload layout changed - bump VERSION");
+static_assert(sizeof(HelloPayload) == 80, "HelloPayload layout changed - bump VERSION");
 static_assert(sizeof(ReadyPayload) == 24, "ReadyPayload layout changed - bump VERSION");
-static_assert(sizeof(JobPayload) == 24 + 96 + ANN_BYTES, "JobPayload layout changed - bump VERSION");
+static_assert(sizeof(JobPayload) == 24 + 96 + BPP9000_SEQUENCE_LENGTH + ANN_BYTES, "JobPayload layout changed - bump VERSION");
 static_assert(sizeof(ResultPayload) == 24 + ANN_BYTES, "ResultPayload layout changed - bump VERSION");
 
 // The largest frame either side ever reads, so both can size one static buffer.

@@ -161,13 +161,13 @@
 #include "files/files.h"
 #include "mining/mining.h"
 #include "mining/custom_qubic_mining_storage.h"
-#include "mining/bpp9000_task.generated.h"
 #include "mining/ant_colony/ant_colony_bpp9000.h"
 
 #include "oracle_core/oracle_engine.h"
 #include "oracle_core/net_msg_impl.h"
 #include "oracle_core/snapshot_files.h"
 #include "mining/ant_colony/ant_pending_solutions.h"
+#include "mining/ant_colony/ant_tick_solutions.h"
 #include "oracle_core/oracle_interfaces_def.h"
 #include "qpi/impl/qpi_oracle_impl.h"
 
@@ -180,6 +180,7 @@
 #include "extensions/core_utils.h"
 #include "extensions/fast_random.h"
 #include "revenue.h"
+#include "mining/price_feed.h"
 
 #if USE_PARALLEL_SIGN_VOTES
 #include "optimizations/opt_parallel_sign_votes.h"
@@ -220,6 +221,7 @@ static void enableAVX();
 #endif
 #include "extensions/wasm/runtime/extension.h"
 #include "extensions/test_invalid_solution.h"
+#include "extensions/btc_price_lite.h"
 #if !defined(LITE_WASM_SC)
 #include "extensions/k12_state_digest_cache.h"
 #endif
@@ -301,6 +303,7 @@ static volatile bool forceNextTick = false;
 static volatile bool forceSwitchEpoch = false;
 static volatile char criticalSituation = 0;
 static volatile bool systemMustBeSaved = false, spectrumMustBeSaved = false, universeMustBeSaved = false, computerMustBeSaved = false;
+static volatile bool btcPriceSeriesMustBeSaved = false;
 
 static int misalignedState = 0;
 
@@ -402,7 +405,10 @@ static int nSolutionProcessorIDs = 0;
 static ScoreFunction<
     NUMBER_OF_SOLUTION_PROCESSORS
 > * score = nullptr;
-static unsigned char* gBpp9000TaskBuffer = nullptr;
+// K12 of the epoch's first frame of task targets.
+static m256i gBpp9000TaskDataHash;
+// Scratch of setBpp9000TaskDataHash().
+static unsigned char gBpp9000FirstFrameTargets[BPP9000_WINDOW_WIDTH];
 
 // The payload is the { publicKey, miningSeed, nonce }
 static_assert(3 * sizeof(m256i) <= ScoreFunction<NUMBER_OF_SOLUTION_PROCESSORS>::TASK_PAYLOAD_MAX,
@@ -454,15 +460,32 @@ static int getSolutionThreshold(score_engine::AlgoType selectedAlgo)
         ? solutionThreshold[system.epoch][selectedAlgo]
         : score_engine::DEFAUL_SOLUTION_THRESHOLD[selectedAlgo];
 }
-static bool applyBpp9000Task();
+static bool setBpp9000TaskDataHash();
+static void foldAppendedBtcPricePoint();
+static void foldBtcPriceSeriesIntoMiningDigest();
 
 static AntColonyBpp9000T gAntColony;
 static AntPendingSolutions gAntPendingSolutions;
+// Of the tick being processed: which solution transactions are superseded by a later one of the same sender.
+static AntTickSolutions<NUMBER_OF_TRANSACTIONS_PER_TICK> gAntTickSolutions;
 static AntColonyBpp9000T::Ann gAntParentAnnScratch[MAX_NUMBER_OF_PROCESSORS];
 static AntColonyBpp9000T::Ann gAntChildAnnScratch[MAX_NUMBER_OF_PROCESSORS];
 // Separate from the two above: a rebuild runs underneath a caller already holding those.
 static AntColonyBpp9000T::Ann gAntRebuildParentScratch[MAX_NUMBER_OF_PROCESSORS];
 static AntColonyBpp9000T::Ann gAntRebuildChildScratch[MAX_NUMBER_OF_PROCESSORS];
+static unsigned char gAntRebuildTaskTargets[MAX_NUMBER_OF_PROCESSORS][BPP9000_SEQUENCE_LENGTH];
+// Task targets of the solution a processor is scoring, one byte per hour.
+static unsigned char gAntTaskTargets[MAX_NUMBER_OF_PROCESSORS][BPP9000_SEQUENCE_LENGTH];
+
+// Fills this processor's buffer with the targets of a solution anchored at anchorTick.
+// Returns the count, 0 without a price series.
+static unsigned int antTaskTargetsAt(unsigned long long processorNumber, unsigned int anchorTick)
+{
+    unsigned int shiftLimit = 0;
+    unsigned int baseHour = 0;
+    return gBtcPriceFeed.taskDataAt(anchorTick, gAntTaskTargets[processorNumber], (unsigned int)BPP9000_SEQUENCE_LENGTH,
+        shiftLimit, baseHour);
+}
 
 // Compiled into every build and switched on with --ant-debug, so a release node can be traced without
 // rebuilding it. Debug builds keep it on by default.
@@ -640,8 +663,13 @@ static void scoreAntSolutionTask(unsigned long long processorNumber, void* paylo
     if (!gAntColony.tryGetReplayScore(replayKey, gAntScoredRating[task->txIdx], gAntScoredAnn[task->txIdx]))
     {
         // Straight into this transaction's own result slot, so nothing is copied afterwards.
+        const unsigned int targetCount = antTaskTargetsAt(processorNumber, task->anchorTick);
+        if (targetCount == 0)
+        {
+            return;
+        }
         gAntScoredRating[task->txIdx] = score->computeAntChildScore(
-            processorNumber, parentAnn, parentShift, task->pubkey, task->nonce,
+            processorNumber, parentAnn, parentShift, gAntTaskTargets[processorNumber], targetCount, task->pubkey, task->nonce,
             anchorDigest, gAntScoredAnn[task->txIdx]);
         gAntColony.putReplayScore(replayKey, gAntScoredRating[task->txIdx], gAntScoredAnn[task->txIdx]);
     }
@@ -694,6 +722,7 @@ static void computeAntAnchorDigest(unsigned int tick, const m256i& transactionDi
 // Tick storage keeps the whole epoch; only non-empty ticks recorded an anchor, which this reproduces.
 static bool recomputeAntAnchorDigest(unsigned int tick, m256i& out)
 {
+    PinScope _pinScope; // drop the page pin on return, else rebuild walks pile them up until the swap cache is fully pinned
     m256i anchorTxDigest;
     ts.tickData.acquireLock();
     const TickData* storedTickData = ts.tickData.getByTickIfNotEmpty(tick);
@@ -809,7 +838,18 @@ static bool materialiseOneAntRecord(unsigned long long processorNumber, unsigned
     score_engine::Rating rebuilt = score_engine::Rating::worst();
     if (!gAntColony.tryGetReplayScore(replayKey, rebuilt, childAnn))
     {
-        rebuilt = score->computeAntChildScore(processorNumber, parentAnn, parentShift, rec->pubkey, rec->nonce, anchorDigest, childAnn);
+        // Graded on the hours its own anchor tick could see, like every node that walked it.
+        unsigned int shiftLimit = 0;
+        unsigned int baseHour = 0;
+        const unsigned int targetCount = gBtcPriceFeed.taskDataAt(rec->anchorTick, gAntRebuildTaskTargets[processorNumber],
+            (unsigned int)BPP9000_SEQUENCE_LENGTH, shiftLimit, baseHour);
+        if (targetCount == 0)
+        {
+            gAntColony.releaseAnnClaim(idx);
+            return false;
+        }
+        rebuilt = score->computeAntChildScore(processorNumber, parentAnn, parentShift, gAntRebuildTaskTargets[processorNumber],
+            targetCount, rec->pubkey, rec->nonce, anchorDigest, childAnn);
         gAntColony.putReplayScore(replayKey, rebuilt, childAnn);
     }
 
@@ -977,12 +1017,17 @@ static void queueAntSolution(unsigned long long processorNumber, const m256i& co
     const unsigned int parentShift = (parentRec != nullptr) ? parentRec->shift : 0u;
     if (!gAntColony.tryGetReplayScore(replayKey, childRating, gAntChildAnnScratch[processorNumber]))
     {
-        childRating = score->computeAntChildScore(processorNumber, parentAnn, parentShift, computorPublicKey,
-            payload.nonce, anchorDigest, gAntChildAnnScratch[processorNumber]);
-        // Cached whatever the outcome: a timed-out network scores invalid, and the walk is
-        // deterministic, so the cached rejection stays right - without the entry the same doomed
-        // solution costs a full walk again on every path that sees it.
-        gAntColony.putReplayScore(replayKey, childRating, gAntChildAnnScratch[processorNumber]);
+        const unsigned int targetCount = antTaskTargetsAt(processorNumber, payload.anchorTick);
+        if (targetCount != 0)
+        {
+            childRating = score->computeAntChildScore(processorNumber, parentAnn, parentShift,
+                gAntTaskTargets[processorNumber], targetCount, computorPublicKey,
+                payload.nonce, anchorDigest, gAntChildAnnScratch[processorNumber]);
+            // Cached whatever the outcome: a timed-out network scores invalid, and the walk is
+            // deterministic, so the cached rejection stays right - without the entry the same doomed
+            // solution costs a full walk again on every path that sees it.
+            gAntColony.putReplayScore(replayKey, childRating, gAntChildAnnScratch[processorNumber]);
+        }
     }
     if (!childRating.isValid())
     {
@@ -1268,7 +1313,8 @@ static bool isLastTickInEpoch() {
 static bool isTrustingClaimedSolutionScore()
 {
     return tickFork::gRollbackAvailable
-        && !isMainMode() && !gReRunStrict && !forceVerifySolutions && !isLastTickInEpoch();
+        && !isMainMode() && !gReRunStrict && !forceVerifySolutions && !isLastTickInEpoch()
+        && !gBtcSeriesCheckPending && !gBtcSeriesMismatch;
 }
 
 // NOTE: this function doesn't work well on a few CPUs, some bits will be flipped after calling this. It's probably microcode bug.
@@ -2028,12 +2074,17 @@ static void processBroadcastTransaction(Peer* peer, RequestResponseHeader* heade
                                 (preParentRec != nullptr) ? preParentRec->shift : 0u;
                             if (!gAntColony.tryGetReplayScore(preKey, preRating, gAntChildAnnScratch[processorNumber]))
                             {
-                                preRating = score->computeAntChildScore(processorNumber, preParentAnn,
-                                    preParentShift, antTx->sourcePublicKey, antTx->nonce, preAnchorDigest,
-                                    gAntChildAnnScratch[processorNumber]);
-                                // cache this score so later can skip the heavy score computation,
-                                // invalid ones included
-                                gAntColony.putReplayScore(preKey, preRating, gAntChildAnnScratch[processorNumber]);
+                                const unsigned int preTargetCount = antTaskTargetsAt(processorNumber, antTx->anchorTick);
+                                if (preTargetCount != 0)
+                                {
+                                    preRating = score->computeAntChildScore(processorNumber, preParentAnn,
+                                        preParentShift, gAntTaskTargets[processorNumber], preTargetCount,
+                                        antTx->sourcePublicKey, antTx->nonce, preAnchorDigest,
+                                        gAntChildAnnScratch[processorNumber]);
+                                    // cache this score so later can skip the heavy score computation,
+                                    // invalid ones included
+                                    gAntColony.putReplayScore(preKey, preRating, gAntChildAnnScratch[processorNumber]);
+                                }
                             }
                         }
                     }
@@ -2435,7 +2486,7 @@ static void processRequestAntEpochContext(Peer* peer, RequestResponseHeader* hea
     respond.maxChildrenPerParent = ANT_MAX_CHILDREN_PER_PARENT;
     respond.epoch = system.epoch;
     respond.topologyHash = *(const m256i*)BPP9000_TOPOLOGY_HASH;
-    respond.dataHash = *(const m256i*)BPP9000_DATA_HASH;
+    respond.dataHash = gBpp9000TaskDataHash;
 
     enqueueResponse(peer, sizeof(respond), RespondAntEpochContext::type(), header->dejavu(), &respond);
 }
@@ -2641,6 +2692,112 @@ static void processRequestRevenueData(unsigned long long processorNumber, Peer* 
     }
 
     enqueueResponse(peer, sizeof(response), RespondRevenueData::type(), header->dejavu(), &response);
+}
+
+// Per-processor BTC price series response buffers
+static RespondPriceSeries gPriceSeriesResponseBuffer[MAX_NUMBER_OF_PROCESSORS];
+static RespondBpp9000TaskData gBpp9000TaskDataResponseBuffer[MAX_NUMBER_OF_PROCESSORS];
+static_assert(BPP9000_TASK_DATA_MAX_TARGETS == BPP9000_SEQUENCE_LENGTH, "the task data message must hold every target");
+
+// Task data of an anchor tick: shift limit and targets.
+static void processRequestBpp9000TaskData(unsigned long long processorNumber, Peer* peer, RequestResponseHeader* header)
+{
+    if (processorNumber >= MAX_NUMBER_OF_PROCESSORS)
+    {
+        return;
+    }
+    if (header->size() != sizeof(RequestResponseHeader) + sizeof(RequestBpp9000TaskData))
+    {
+        return;
+    }
+    const RequestBpp9000TaskData* request = header->getPayload<RequestBpp9000TaskData>();
+    RespondBpp9000TaskData& response = gBpp9000TaskDataResponseBuffer[processorNumber];
+    setMem(&response, RESPOND_BPP9000_TASK_DATA_HEADER_SIZE, 0);
+    response.tick = system.tick;
+    response.anchorTick = request->anchorTick;
+    response.epoch = system.epoch;
+
+    // Every tick before the anchor tick must be processed, or an hour stored in one of them is missed.
+    unsigned int targetCount = 0;
+    if (request->anchorTick >= system.initialTick && request->anchorTick <= system.tick)
+    {
+        unsigned int shiftLimit = 0;
+        unsigned int baseHour = 0;
+        // The first frame is fixed for the epoch.
+        if (gBtcPriceFeed.taskTailAt(request->anchorTick, response.targets + BPP9000_WINDOW_WIDTH, shiftLimit, baseHour))
+        {
+            copyMem(response.targets, gBpp9000FirstFrameTargets, BPP9000_WINDOW_WIDTH);
+            targetCount = (unsigned int)BPP9000_WINDOW_WIDTH + shiftLimit;
+            response.valid = 1;
+            response.baseHour = baseHour;
+            response.shiftLimit = shiftLimit;
+        }
+    }
+
+    enqueueResponse(peer, RESPOND_BPP9000_TASK_DATA_HEADER_SIZE + targetCount, RespondBpp9000TaskData::type(), header->dejavu(), &response);
+}
+
+// State of the BTC price series and a page of points from the requested hour.
+static void processRequestPriceSeries(unsigned long long processorNumber, Peer* peer, RequestResponseHeader* header)
+{
+    if (processorNumber >= MAX_NUMBER_OF_PROCESSORS)
+    {
+        return;
+    }
+    if (header->size() != sizeof(RequestResponseHeader) + sizeof(RequestPriceSeries))
+    {
+        return;
+    }
+    const RequestPriceSeries* request = header->getPayload<RequestPriceSeries>();
+    RespondPriceSeries& response = gPriceSeriesResponseBuffer[processorNumber];
+
+    unsigned int requestedCount = request->count;
+    if (requestedCount > PRICE_SERIES_MAX_POINTS_PER_RESPONSE)
+    {
+        requestedCount = PRICE_SERIES_MAX_POINTS_PER_RESPONSE;
+    }
+
+    ACQUIRE(gBtcPriceFeed.lock);
+    response.tick = system.tick;
+    response.epoch = system.epoch;
+    response.synced = gBtcPriceFeed.synced ? 1 : 0;
+    response.bound = gBtcPriceFeed.isBound() ? 1 : 0;
+    response.source = gBtcPriceFeed.image.kind;
+    response.nextHour = gBtcPriceFeed.image.nextHour;
+    response.baseHour = gBtcPriceFeed.image.baseHour;
+    response.failedAttempts = gBtcPriceFeed.image.failedAttempts;
+    response.firstFailMs = gBtcPriceFeed.image.firstFailMs;
+    response.lastFailMs = gBtcPriceFeed.image.lastFailMs;
+    copyMem(response.seriesDigest, gBtcPriceFeed.seriesDigest, sizeof(response.seriesDigest));
+    response.numSuccess = gBtcPriceFeed.numSuccess;
+    response.numTimeout = gBtcPriceFeed.numTimeout;
+    response.numUnresolvable = gBtcPriceFeed.numUnresolvable;
+    response.numInvalidReply = gBtcPriceFeed.numInvalidReply;
+    response.numStartFailed = gBtcPriceFeed.numStartFailed;
+    response.numFilled = gBtcPriceFeed.numFilled;
+    response.count = 0;
+    for (unsigned int i = 0; i < requestedCount; i++)
+    {
+        const unsigned int hour = request->fromHour + i;
+        if (hour >= gBtcPriceFeed.image.nextHour)
+        {
+            break;
+        }
+        const BtcPricePoint* point = gBtcPriceFeed.findPoint(hour);
+        if (point)
+        {
+            RespondPriceSeriesPoint& out = response.points[response.count];
+            out.hour = point->hour;
+            out.appendTick = point->appendTick;
+            out.flags = point->flags;
+            out.priceE8 = point->priceE8;
+            response.count++;
+        }
+    }
+    RELEASE(gBtcPriceFeed.lock);
+
+    const unsigned int responseSize = RESPOND_PRICE_SERIES_HEADER_SIZE + response.count * sizeof(RespondPriceSeriesPoint);
+    enqueueResponse(peer, responseSize, RespondPriceSeries::type(), header->dejavu(), &response);
 }
 
 // Hardcoded doge dispatcher public key (identity: XPILPIJYHRBTACMMIRSJLIZWCXDBHWVEOTZBQFBXWEUXDZGGDEKDQPIEQKQK)
@@ -3335,6 +3492,18 @@ static void requestProcessor(void* ProcedureArgument, unsigned long long process
                 case RequestRevenueData::type():
                 {
                     processRequestRevenueData(processorNumber, peer, header);
+                }
+                break;
+
+                case RequestPriceSeries::type():
+                {
+                    processRequestPriceSeries(processorNumber, peer, header);
+                }
+                break;
+
+                case RequestBpp9000TaskData::type():
+                {
+                    processRequestBpp9000TaskData(processorNumber, peer, header);
                 }
                 break;
 
@@ -4112,9 +4281,11 @@ static void processTickTransactionAntColonySolution(
     {
         // The scorer rejects these before any walk, so the quorum refunds none of them. Taken on trust,
         // one of them would be refunded here and nowhere else, and every trusting node would diverge.
+        // A trusted parent's stored shift is a lower bound, so one past the anchor's limit is past it for real.
         const unsigned int parentShift = (parentRec != nullptr) ? parentRec->shift : 0u;
-        if (!score_engine::ScoreEngineT::isCanonicalAntNonce(transaction->nonce.m256i_u8)
-            || parentShift > score_engine::ScoreBpp9000T::shiftCap)
+        unsigned int anchorShiftLimit = 0;
+        const bool pastAnchorLimit = antShiftLimitAt(transaction->anchorTick, anchorShiftLimit) && parentShift > anchorShiftLimit;
+        if (!score_engine::ScoreEngineT::isCanonicalAntNonce(transaction->nonce.m256i_u8) || pastAnchorLimit)
         {
             gAntColony.recordReject(ValidityResult::RejectNonCanonicalNonce);
             logAntSolutionOutcome(transaction, 0, ValidityResult::RejectNonCanonicalNonce);
@@ -4155,14 +4326,21 @@ static void processTickTransactionAntColonySolution(
         const unsigned int parentShift = (parentRec != nullptr) ? parentRec->shift : 0u;
         if (!gAntColony.tryGetReplayScore(replayKey, childRating, childAnnScratch))
         {
-            childRating = score->computeAntChildScore(
-                processorNumber, parentAnn, parentShift, transaction->sourcePublicKey, transaction->nonce,
-                anchorDigest, childAnnScratch);
-            gAntColony.putReplayScore(replayKey, childRating, childAnnScratch);
+            // Without the price series the node cannot score and leaves consensus on this tick.
+            const unsigned int targetCount = antTaskTargetsAt(processorNumber, transaction->anchorTick);
+            if (targetCount != 0)
+            {
+                childRating = score->computeAntChildScore(
+                    processorNumber, parentAnn, parentShift, gAntTaskTargets[processorNumber], targetCount,
+                    transaction->sourcePublicKey, transaction->nonce, anchorDigest, childAnnScratch);
+                gAntColony.putReplayScore(replayKey, childRating, childAnnScratch);
+            }
         }
         childAnn = &childAnnScratch;
     }
 
+    // No score: the nonce was refused, the walk timed out, the child's data does not reach its parent's
+    // shift, or the child does not beat its parent rated on that data. All are counted under this one result.
     // This and the two score rules inside commit() are the only checks decided by the score itself, and none
     // may fire on a trusted one: rejecting leaves no refund for the quorum to disagree with, so the tree
     // diverges in silence. Accepting turns the lie into a spectrum disagreement instead.
@@ -4406,8 +4584,22 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
                     if (transaction->amount >= AntColonyMiningSolutionTransaction::minAmount()
                         && transaction->inputSize == AntColonyMiningSolutionTransaction::minInputSize())
                     {
-                        processTickTransactionAntColonySolution(
-                            (AntColonyMiningSolutionTransaction*)transaction, transactionIndex, processorNumber);
+                        if (gAntTickSolutions.isSuperseded(transactionIndex))
+                        {
+                            // The sender has another solution later in this tick, and only that one counts.
+                            // This one is not looked at: the deposit goes back and it may be sent again.
+                            increaseEnergy(transaction->sourcePublicKey, transaction->amount);
+                            const QuTransfer quTransfer = { m256i::zero(), transaction->sourcePublicKey, transaction->amount };
+                            logger.logQuTransfer(quTransfer);
+                            gAntColony.recordReject(ValidityResult::SkippedSupersededInTick);
+                            logAntSolutionOutcome((AntColonyMiningSolutionTransaction*)transaction, 0,
+                                ValidityResult::SkippedSupersededInTick);
+                        }
+                        else
+                        {
+                            processTickTransactionAntColonySolution(
+                                (AntColonyMiningSolutionTransaction*)transaction, transactionIndex, processorNumber);
+                        }
                     }
                 }
                 break;
@@ -4441,9 +4633,30 @@ static void processTickTransaction(const Transaction* transaction, unsigned int 
                         forceZeroFee = computorIndex(queryTx->sourcePublicKey) >= 0;
                     }
 
+                    // the first BTC price query of the tick leader in a slot tick does not cost fees
+                    bool freeBtcFeedQuery = false;
+                    unsigned int btcFeedHour = 0;
+                    if (isFreeBtcFeedQuery(transaction, system.tick, broadcastedComputors.computors.publicKeys[system.tick % NUMBER_OF_COMPUTORS], QPI::DateAndTime::now(), btcFeedHour))
+                    {
+                        freeBtcFeedQuery = gBtcPriceFeed.consumeFreeQuerySlot(system.tick);
+                        forceZeroFee = freeBtcFeedQuery;
+                    }
+
                     // start user query
                     int64_t queryId = oracleEngine.startUserQuery(queryTx, transactionIndex, forceZeroFee);
                     const bool error = queryId < 0;
+
+                    if (freeBtcFeedQuery)
+                    {
+                        if (error)
+                        {
+                            gBtcPriceFeed.onQueryStartFailed();
+                        }
+                        else
+                        {
+                            gBtcPriceFeed.onQueryStarted(queryId, btcFeedHour);
+                        }
+                    }
 
                     if (queryTx->oracleInterfaceIndex == OI::DogeShareValidation::oracleInterfaceIndex)
                     {
@@ -4623,6 +4836,140 @@ static bool makeAndBroadcastCustomMiningTransaction(
         }
     }
     return false;
+}
+
+// Puts this tick leader's BTC price query into its tick as transaction txSlot. True if it was stored.
+static bool makeAndBroadcastBtcPriceQueryTransaction(int i, BroadcastFutureTickData& td, int txSlot)
+{
+    const m256i& leaderKey = computorPublicKeys[ownComputorIndicesMapping[i]];
+    unsigned int hour = 0;
+    if (!gBtcPriceFeed.shouldSend(td.tickData.tick, QPI::DateAndTime::now(), hour)
+        || spectrumIndex(leaderKey) < 0)
+    {
+        return false;
+    }
+
+    OI::Price::OracleQuery query;
+    if (!btcFeedMakeQuery(hour, query))
+    {
+        return false;
+    }
+
+    unsigned char buffer[sizeof(OracleUserQueryTransactionPrefix) + sizeof(OI::Price::OracleQuery) + SIGNATURE_SIZE];
+    auto* tx = reinterpret_cast<OracleUserQueryTransactionPrefix*>(buffer);
+    tx->sourcePublicKey = leaderKey;
+    tx->destinationPublicKey = m256i::zero();
+    tx->amount = 0;
+    tx->tick = td.tickData.tick;
+    tx->inputType = OracleUserQueryTransactionPrefix::transactionType();
+    tx->inputSize = OracleUserQueryTransactionPrefix::minInputSize() + sizeof(OI::Price::OracleQuery);
+    tx->oracleInterfaceIndex = OI::Price::oracleInterfaceIndex;
+    tx->timeoutMilliseconds = BTC_FEED_QUERY_TIMEOUT_MS;
+    copyMem(buffer + sizeof(OracleUserQueryTransactionPrefix), &query, sizeof(query));
+
+    unsigned char digest[32];
+    KangarooTwelve(buffer, sizeof(Transaction) + tx->inputSize, digest, sizeof(digest));
+    sign(computorSubseeds[ownComputorIndicesMapping[i]].m256i_u8, leaderKey.m256i_u8, digest, tx->signaturePtr());
+
+    const unsigned int transactionSize = tx->totalSize();
+    KangarooTwelve(buffer, transactionSize, digest, sizeof(digest));
+    bool inserted = false;
+    auto* tsReqTickTransactionOffsets = ts.tickTransactionOffsets.getByTickIndex(ts.tickToIndexCurrentEpoch(td.tickData.tick));
+    ts.tickTransactions.acquireLock();
+    if (!tsReqTickTransactionOffsets[txSlot]
+        && ts.nextTickTransactionOffset + transactionSize <= ts.tickTransactions.storageSpaceCurrentEpoch)
+    {
+        td.tickData.transactionDigests[txSlot] = m256i(digest);
+        tsReqTickTransactionOffsets[txSlot] = ts.nextTickTransactionOffset;
+        copyMem(ts.tickTransactions(ts.nextTickTransactionOffset), buffer, transactionSize);
+        ts.nextTickTransactionOffset += transactionSize;
+        inserted = true;
+    }
+    ts.tickTransactions.releaseLock();
+
+    if (inserted)
+    {
+        enqueueResponse(NULL, transactionSize, BROADCAST_TRANSACTION, 0, buffer);
+    }
+    return inserted;
+}
+
+// Main thread only. Reports the series state on the console.
+static void logBtcPriceSeries(const CHAR16* what)
+{
+    CHAR16 text[160];
+    setText(text, what);
+    appendText(text, L" next hour ");
+    appendNumber(text, gBtcPriceFeed.image.nextHour, FALSE);
+    appendText(text, L", base hour ");
+    appendNumber(text, gBtcPriceFeed.image.baseHour, FALSE);
+    appendText(text, L", digest ");
+    appendNumber(text, *((unsigned int*)gBtcPriceFeed.seriesDigest), FALSE);
+    appendText(text, L", source ");
+    appendNumber(text, gBtcPriceFeed.image.kind, FALSE);
+    logToConsole(text);
+}
+
+// Main thread only. Writes btcPriceSeries.<fileEpoch>; without a usable series removes a stale file of that name.
+static void saveBtcPriceSeries(unsigned int kind, unsigned int fileEpoch, unsigned int tick)
+{
+    addEpochToFileName(BTC_PRICE_SERIES_FILE_NAME, sizeof(BTC_PRICE_SERIES_FILE_NAME) / sizeof(BTC_PRICE_SERIES_FILE_NAME[0]), (short)fileEpoch);
+    if (!gBtcPriceFeed.synced)
+    {
+        removeFile(NULL, BTC_PRICE_SERIES_FILE_NAME);
+        logToConsole(L"BTC price series is not synced, no file written");
+        return;
+    }
+    if (btcFeedSaveImageFile(BTC_PRICE_SERIES_FILE_NAME, NULL, gBtcPriceFeed, gBtcPriceFeedIoBuffer.image, kind, system.epoch, tick))
+    {
+        logBtcPriceSeries(L"BTC price series saved,");
+    }
+    else
+    {
+        logToConsole(L"Failed to save BTC price series!");
+    }
+}
+
+// Main thread only, at node start. Loads the series this start may use: the switch file or the bootstrap
+// for a new epoch, the F6 file after a mid-epoch restart.
+static void loadBtcPriceSeries()
+{
+    gBtcPriceFeed.reset();
+    if (system.tick != system.initialTick)
+    {
+        logToConsole(L"BTC price series not loaded: node does not start at the initial tick");
+        return;
+    }
+
+    const bool tickIsFirstTickOfEpoch = (TICK_IS_FIRST_TICK_OF_EPOCH != 0);
+    BtcPriceImage& buffer = gBtcPriceFeedIoBuffer.image;
+    addEpochToFileName(BTC_PRICE_SERIES_FILE_NAME, sizeof(BTC_PRICE_SERIES_FILE_NAME) / sizeof(BTC_PRICE_SERIES_FILE_NAME[0]), (short)system.epoch);
+    if (btcFeedLoadImageFile(BTC_PRICE_SERIES_FILE_NAME, NULL, buffer)
+        && buffer.kind != BTC_PRICE_KIND_BOOTSTRAP
+        && btcFeedImageIsAcceptable(buffer, system.epoch, system.initialTick, tickIsFirstTickOfEpoch))
+    {
+        gBtcPriceFeed.adoptImage(buffer);
+    }
+    else if (tickIsFirstTickOfEpoch && btcFeedLoadImageFile(BTC_PRICE_BOOTSTRAP_FILE_NAME, NULL, buffer))
+    {
+        unsigned char fileHash[32];
+        KangarooTwelve(&buffer, sizeof(buffer), fileHash, sizeof(fileHash));
+        if (compareMem(fileHash, BTC_PRICE_BOOTSTRAP_HASH, sizeof(fileHash)) == 0
+            && buffer.kind == BTC_PRICE_KIND_BOOTSTRAP
+            && btcFeedImageIsAcceptable(buffer, system.epoch, system.initialTick, tickIsFirstTickOfEpoch))
+        {
+            gBtcPriceFeed.adoptImage(buffer);
+        }
+    }
+
+    if (gBtcPriceFeed.synced)
+    {
+        logBtcPriceSeries(L"BTC price series loaded,");
+    }
+    else
+    {
+        logToConsole(L"BTC price series NOT loaded: no usable file for this start, the feed is idle on this node");
+    }
 }
 
 static bool makeAndBroadcastExecutionFeeTransaction(int i, BroadcastFutureTickData& td, int txSlot)
@@ -4969,6 +5316,20 @@ static void processTick(unsigned long long processorNumber)
         // A record rebuilt since the last tick may have reached further than the guess it was ranked on.
         AntColonyMaintenance::drainRaisedShifts(gAntColony, updateMinerRankingAndFutureComputors);
 
+        // One solution per sender per tick: find the superseded ones before any is queued for scoring or executed.
+        gAntTickSolutions.reset();
+        for (unsigned int transactionIndex = 0; transactionIndex < NUMBER_OF_TRANSACTIONS_PER_TICK; transactionIndex++)
+        {
+            if (!isZero(nextTickData.transactionDigests[transactionIndex]) && tsCurrentTickTransactionOffsets[transactionIndex])
+            {
+                const Transaction* transaction = ts.tickTransactions(tsCurrentTickTransactionOffsets[transactionIndex]);
+                if (AntColonyMiningSolutionTransaction::isSolutionTransaction(transaction))
+                {
+                    gAntTickSolutions.add(transaction->sourcePublicKey, transactionIndex);
+                }
+            }
+        }
+
         // Only apply skipping compute solution when in Mainnet with Aux node (except for last tick).
         // A strict replay computes too, and this is what clears the per-transaction pre-score gates so it
         // cannot read the previous tick's answers.
@@ -5035,7 +5396,8 @@ static void processTick(unsigned long long processorNumber)
                                 // and anything this tick will take on its claimed score anyway
                                 unsigned int antFlagIndices[2];
                                 computeAntSolutionFlagIndices(task.pubkey, task.nonce, task.parentRef, antFlagIndices);
-                                if (!isAntSolutionSeen(antFlagIndices) && !isTrustingClaimedSolutionScore())
+                                if (!gAntTickSolutions.isSuperseded(transactionIndex) && !isAntSolutionSeen(antFlagIndices)
+                                    && !isTrustingClaimedSolutionScore())
                                 {
                                     score->addTask(scoreAntSolutionTask, &task, sizeof(task));
                                 }
@@ -5285,7 +5647,25 @@ static void processTick(unsigned long long processorNumber)
     while (finishedUserQuery)
     {
         PinScope _pinScope; // release this query's tickTransaction/txOffset swap-page pins each iteration
-        if (finishedUserQuery->interfaceIndex == OI::DogeShareValidation::oracleInterfaceIndex)
+        if (gBtcPriceFeed.isBound() && finishedUserQuery->queryId == gBtcPriceFeed.boundQueryId)
+        {
+            // The BTC price query for the next missing hour has finished.
+            OI::Price::OracleReply priceReply;
+            setMem(&priceReply, sizeof(priceReply), 0);
+            bool replyOk = false;
+            if (finishedUserQuery->status == ORACLE_QUERY_STATUS_SUCCESS)
+            {
+                replyOk = oracleEngine.getOracleReply(finishedUserQuery->queryId, &priceReply, sizeof(priceReply));
+            }
+            const unsigned int nextHourBefore = gBtcPriceFeed.image.nextHour;
+            gBtcPriceFeed.onQueryFinished(finishedUserQuery->queryId, finishedUserQuery->status, replyOk,
+                priceReply.numerator, priceReply.denominator, QPI::DateAndTime::now(), system.tick);
+            if (gBtcPriceFeed.image.nextHour != nextHourBefore)
+            {
+                foldAppendedBtcPricePoint();
+            }
+        }
+        else if (finishedUserQuery->interfaceIndex == OI::DogeShareValidation::oracleInterfaceIndex)
         {
             // Look up query tx to get query data.
             ASSERT(finishedUserQuery->type == ORACLE_QUERY_TYPE_USER_QUERY);
@@ -5372,6 +5752,12 @@ static void processTick(unsigned long long processorNumber)
             }
         }
         finishedUserQuery = oracleEngine.getFinishedUserQuery();
+    }
+
+    // A bound BTC price query ends in the loop above; if it is not running here the node missed its result.
+    if (gBtcPriceFeed.isBound())
+    {
+        gBtcPriceFeed.checkBoundQuery(oracleEngine.getOracleQueryStatus(gBtcPriceFeed.boundQueryId));
     }
 
     // The last executionFeeReport for the previous phase is published by comp <NUMBER_OF_COMPUTORS - 1> (0-indexed) in the last tick t1 of the
@@ -5527,6 +5913,13 @@ static void processTick(unsigned long long processorNumber)
                     KangarooTwelve(timelockPreimage, sizeof(timelockPreimage), &broadcastedFutureTickData.tickData.timelock, sizeof(broadcastedFutureTickData.tickData.timelock));
 
                     unsigned int nextTxIndex = 0;
+                    {
+                        // insert & broadcast the BTC price query first, so it is started before pool transactions
+                        if (makeAndBroadcastBtcPriceQueryTransaction(i, broadcastedFutureTickData, nextTxIndex))
+                        {
+                            nextTxIndex++;
+                        }
+                    }
                     unsigned int numPendingTickTxs = pendingTxsPool.getNumberOfPendingTickTxs(system.tick + TICK_TRANSACTIONS_PUBLICATION_OFFSET);
                     pendingTxsPool.acquireLock();
                     for (unsigned int tx = 0; tx < numPendingTickTxs; ++tx)
@@ -6550,6 +6943,15 @@ static bool saveAllNodeStates()
         return false;
     }
 
+    // Before the tick storage, whose metadata marks the snapshot valid: a valid snapshot always holds
+    // the price series of its own tick.
+    addEpochToFileName(BTC_PRICE_SERIES_SNAPSHOT_FILE_NAME, sizeof(BTC_PRICE_SERIES_SNAPSHOT_FILE_NAME) / sizeof(BTC_PRICE_SERIES_SNAPSHOT_FILE_NAME[0]), system.epoch);
+    if (!btcFeedSaveSnapshotFile(BTC_PRICE_SERIES_SNAPSHOT_FILE_NAME, directory, gBtcPriceFeed, gBtcPriceFeedIoBuffer, system.epoch, system.tick))
+    {
+        logToConsole(L"Failed to save BTC price series snapshot");
+        return false;
+    }
+
     setText(message, L"Saving tick storage ");
     logToConsole(message);
     if (ts.trySaveToFile(system.epoch, system.tick, directory) != 0)
@@ -6642,6 +7044,14 @@ static bool loadAllNodeStates()
         }
     }
 #endif
+
+    // The same for the BTC price series: a snapshot without a usable one cannot be used.
+    addEpochToFileName(BTC_PRICE_SERIES_SNAPSHOT_FILE_NAME, sizeof(BTC_PRICE_SERIES_SNAPSHOT_FILE_NAME) / sizeof(BTC_PRICE_SERIES_SNAPSHOT_FILE_NAME[0]), system.epoch);
+    if (!btcFeedReadSnapshotFile(BTC_PRICE_SERIES_SNAPSHOT_FILE_NAME, directory, gBtcPriceFeedIoBuffer, system.epoch))
+    {
+        logToConsole(L"No usable BTC price series snapshot. Skip using node states snapshot.");
+        return false;
+    }
 
     if (ts.tryLoadFromFile(system.epoch, directory) != 0)
     {
@@ -6781,7 +7191,7 @@ static bool loadAllNodeStates()
         return false;
     }
 
-    setMem(assetChangeFlags, sizeof(assetChangeFlags), 0);
+    setMem(assetChangeFlags, ASSETS_CAPACITY / 8, 0);
     setMem(spectrumChangeFlags, sizeof(spectrumChangeFlags), 0);
     CHAR16 SPECTRUM_DIGEST_FILE_NAME[] = L"snapshotSpectrumDigest";
     loadedSize = load(SPECTRUM_DIGEST_FILE_NAME, spectrumDigestsSizeInByte, (unsigned char*)spectrumDigests, directory);
@@ -6857,6 +7267,14 @@ static bool loadAllNodeStates()
 #if !defined(NDEBUG)
     oracleEngine.checkStateConsistencyWithAssert();
 #endif
+
+    // Read and checked at the start of the load
+    if (!btcFeedAdoptSnapshot(gBtcPriceFeed, gBtcPriceFeedIoBuffer, system.tick))
+    {
+        logToConsole(L"Failed to load BTC price series snapshot");
+        return false;
+    }
+    logBtcPriceSeries(L"BTC price series loaded,");
 
 #if ADDON_TX_STATUS_REQUEST
     if (!loadStateTxStatus(numberOfTransactions, directory))
@@ -7963,6 +8381,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
     // only init first tick if it doesn't load all node states from file
     if (!loadAllNodeStateFromFile && !tickFork::gIsForkChild)
     {
+        PinScope _pinScope; // runs before the loop's PinScope, so release its ticks page pin here
         initializeFirstTick();
     }
 #endif
@@ -8192,6 +8611,10 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                     if (status == 1)
                     {
                         const bool spectrumMismatch = etalonTick.saltedSpectrumDigest != spectrumDigestFromQuorum;
+                        if (gBtcSeriesCheckPending && !spectrumMismatch)
+                        {
+                            checkBtcSeriesAgainstQuorum(resourceTestingDigest, resourceTestingDigestFromQuorum);
+                        }
                         if (tickFork::verdict(spectrumMismatch, spectrumDigestFromQuorum, processorNumber))
                         {
                             resourceTestingDigest = resourceTestingDigestFromQuorum;
@@ -8608,7 +9031,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                                         logToConsole(dbg);
                                     }
 #endif
-                                    gAntColony.exportBestSolutions(system.epoch, NULL);
+                                    gAntColony.exportBestSolutions(system.epoch, NULL, gBpp9000TaskDataHash.m256i_u8);
 
                                     // Reorder futureComputors so requalifying computors keep their index
                                     // This is needed for correct execution fee reporting across epoch boundaries
@@ -8629,11 +9052,12 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                                     isBeginEpoch = true;
                                     logToConsole(L"EPOCH TRANSITION: beginEpoch() done");
 
-                                    // beginEpoch() called score->initMemory(), which zeroed the scorer, so re-apply
-                                    // the task from the resident buffer. This assumes the task is unchanged across the transition;
-                                    // if a future epoch needs a different task file, branch here on the epoch to reload from file
-                                    // instead of re-applying memory
-                                    if (!applyBpp9000Task())
+                                    // beginEpoch() reset the oracle engine and dropped a running BTC price query
+                                    gBtcPriceFeed.onEpochSwitch();
+                                    foldBtcPriceSeriesIntoMiningDigest();
+
+                                    // the new epoch's first frame ends at the base hour that was just moved
+                                    if (!setBpp9000TaskDataHash())
                                     {
                                         ASSERT(false);
                                     }
@@ -8658,7 +9082,8 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                                     spectrumMustBeSaved = true;
                                     universeMustBeSaved = true;
                                     computerMustBeSaved = true;
-                                    WAIT_WHILE(computerMustBeSaved || universeMustBeSaved || spectrumMustBeSaved);
+                                    btcPriceSeriesMustBeSaved = true;
+                                    WAIT_WHILE(computerMustBeSaved || universeMustBeSaved || spectrumMustBeSaved || btcPriceSeriesMustBeSaved);
 
                                     // update etalon tick
                                     etalonTick.epoch++;
@@ -8997,120 +9422,42 @@ static bool saveSystem(CHAR16* directory)
     return false;
 }
 
-// Load and verify the bpp9000 task file (topology + windowed data) and hand it to the scorer
-static bool loadBpp9000Task()
+// Hashes the first frame of the epoch's task targets. False without a price series.
+static bool setBpp9000TaskDataHash()
 {
-    const unsigned int N = (unsigned int)BPP9000_NUMBER_OF_INPUT_NEURONS;
-    const unsigned int M = (unsigned int)BPP9000_NUMBER_OF_OUTPUT_NEURONS;
-    const unsigned long long T = BPP9000_SEQUENCE_LENGTH;
-    const unsigned long long headerBytes = sizeof(score_task_file::TaskFileHeader);
-
-    // The task ships inside the binary and is written out first, so every read below sees this build's copy.
-    if (save(SCORE_BPP9000_TASK_FILE_NAME, BPP9000_TASK_SIZE, BPP9000_TASK_BYTES, NULL) != (long long)BPP9000_TASK_SIZE)
+    const unsigned int count = gBtcPriceFeed.buildTaskTargets(gBpp9000FirstFrameTargets, (unsigned int)BPP9000_WINDOW_WIDTH);
+    if (count != BPP9000_WINDOW_WIDTH)
     {
-        logToConsole(L"Failed to extract the embedded bpp9000 task.");
+        gBpp9000TaskDataHash = m256i::zero();
         return false;
     }
-
-    // Read the header first: the topology block is sized by the file's own population, which need not match
-    // the configured one (the wiring comes from the pubkey, not the task).
-    score_task_file::TaskFileHeader fileHeader;
-    if (load(SCORE_BPP9000_TASK_FILE_NAME, headerBytes, (unsigned char*)&fileHeader, NULL) != (long long)headerBytes)
-    {
-        logToConsole(L"bpp9000 task file missing or too short - node will not do score verification.");
-        return false;
-    }
-    const unsigned long long topoBytes = score_task_file::topologyBytes(
-        fileHeader.numInputTrits, fileHeader.numOutputTrits, fileHeader.population, fileHeader.numNeighbors);
-    const unsigned long long dataBytes = score_task_file::dataBytes(N, M, T);
-    const unsigned long long totalBytes = headerBytes + topoBytes + dataBytes;
-
-    // The canonical task may carry more samples than the configured sequence length consumes, so the
-    // embedded blob only has to cover totalBytes; anything past that is never read.
-    if (totalBytes > BPP9000_TASK_SIZE)
-    {
-        logToConsole(L"Failed to extract the embedded bpp9000 task.");
-        return false;
-    }
-
-    if (!allocPoolWithErrorLog(L"bpp9000Task", totalBytes, (void**)&gBpp9000TaskBuffer, __LINE__))
-    {
-        return false;
-    }
-
-    bool ok = false;
-    const long long loadedSize = load(SCORE_BPP9000_TASK_FILE_NAME, totalBytes, gBpp9000TaskBuffer, NULL);
-    if (loadedSize != (long long)totalBytes)
-    {
-        logToConsole(L"bpp9000 task file missing or wrong size - node will not do score verification.");
-    }
-    else
-    {
-        const score_task_file::TaskFileHeader* h = (const score_task_file::TaskFileHeader*)gBpp9000TaskBuffer;
-        const unsigned char* topoBlock = gBpp9000TaskBuffer + headerBytes;
-        const unsigned char* dataBlock = topoBlock + topoBytes;
-
-        unsigned char dataHash[32];
-        KangarooTwelve(dataBlock, (unsigned int)dataBytes, dataHash, 32);
-#if BPP9000_TASK_HAS_TOPOLOGY
-        unsigned char topoHash[32];
-        KangarooTwelve(topoBlock, (unsigned int)topoBytes, topoHash, 32);
-#endif
-
-        if (h->magic != score_task_file::MAGIC || h->version != score_task_file::VERSION
-            || h->numInputTrits != N || h->numOutputTrits != M
-#if BPP9000_TASK_HAS_TOPOLOGY
-            || h->population != (unsigned int)BPP9000_POPULATION_THRESHOLD
-            || h->numNeighbors != (unsigned int)BPP9000_NUMBER_OF_NEIGHBORS
-#endif
-            || h->numPairs < T)
-        {
-            logToConsole(L"bpp9000 task header does not match configured parameters - node will not do score verification.");
-        }
-        else if (
-#if BPP9000_TASK_HAS_TOPOLOGY
-                 *(const m256i*)topoHash != *(const m256i*)BPP9000_TOPOLOGY_HASH ||
-#endif
-                 *(const m256i*)dataHash != *(const m256i*)BPP9000_DATA_HASH)
-        {
-            logToConsole(L"bpp9000 task hash mismatch (not the pinned canonical task) - node will not do score verification.");
-        }
-        else if (!score->loadTask(topoBlock, dataBlock))
-        {
-            logToConsole(L"bpp9000 task failed topology validation - node will not do score verification.");
-        }
-        else
-        {
-            logToConsole(L"Loaded bpp9000 task file");
-            ok = true;
-        }
-    }
-
-    // Keep the verified buffer resident (for applyBpp9000Task) on success; release it on failure.
-    if (!ok)
-    {
-        freePool(gBpp9000TaskBuffer);
-        gBpp9000TaskBuffer = nullptr;
-    }
-    return ok;
+    KangarooTwelve(gBpp9000FirstFrameTargets, (unsigned int)BPP9000_WINDOW_WIDTH, &gBpp9000TaskDataHash, sizeof(gBpp9000TaskDataHash));
+    return true;
 }
 
-// Re-apply the already-verified, resident task to the scorer. Used after beginEpoch() zeroes the scorer:
-// no file I/O and no re-hashing (the blocks were verified once at init), so it cannot fail on a missing or
-// altered file. Returns false only if the task was never loaded.
-static bool applyBpp9000Task()
+// Tick processor only. The hour just appended enters the mining digest.
+static void foldAppendedBtcPricePoint()
 {
-    if (gBpp9000TaskBuffer == nullptr)
+    const BtcPricePoint* point = gBtcPriceFeed.findPoint(gBtcPriceFeed.image.nextHour - 1);
+    if (point)
     {
-        return false;
+        unsigned int pointDigest = 0;
+        KangarooTwelve(point, sizeof(BtcPricePoint), &pointDigest, sizeof(pointDigest));
+        resourceTestingDigest ^= pointDigest;
+        KangarooTwelve(&resourceTestingDigest, sizeof(resourceTestingDigest), &resourceTestingDigest, sizeof(resourceTestingDigest));
     }
-    const unsigned long long headerBytes = sizeof(score_task_file::TaskFileHeader);
-    const score_task_file::TaskFileHeader* h = (const score_task_file::TaskFileHeader*)gBpp9000TaskBuffer;
-    const unsigned long long topoBytes = score_task_file::topologyBytes(
-        h->numInputTrits, h->numOutputTrits, h->population, h->numNeighbors);
-    const unsigned char* topoBlock = gBpp9000TaskBuffer + headerBytes;
-    const unsigned char* dataBlock = topoBlock + topoBytes;
-    return score->loadTask(topoBlock, dataBlock);
+}
+
+// Folds the series state into the mining digest at the epoch switch and at a start from files (a snapshot's
+// digest already holds it). A node with another series differs in its first vote.
+static void foldBtcPriceSeriesIntoMiningDigest()
+{
+    unsigned int stateDigest = 0;
+    if (gBtcPriceFeed.stateDigest(stateDigest))
+    {
+        resourceTestingDigest ^= stateDigest;
+        KangarooTwelve(&resourceTestingDigest, sizeof(resourceTestingDigest), &resourceTestingDigest, sizeof(resourceTestingDigest));
+    }
 }
 
 static bool initialize()
@@ -9248,6 +9595,10 @@ static bool initialize()
         {
             return false;
         }
+        if (!gAntTickSolutions.init())
+        {
+            return false;
+        }
 
         setMem(&solutionThreshold[0][0], sizeof(int) * MAX_NUMBER_EPOCH * score_engine::AlgoType::MaxAlgoCount, 0);
         if (!allocSparsePoolWithErrorLog(L"minserSolutionFlag", NUMBER_OF_MINER_SOLUTION_FLAGS / 8, (void**)&minerSolutionFlags, __LINE__))
@@ -9339,6 +9690,17 @@ static bool initialize()
             etalonTick.day = system.initialDay;
             etalonTick.month = system.initialMonth;
             etalonTick.year = system.initialYear;
+
+            writeEmbeddedBtcPriceBootstrap();
+            loadBtcPriceSeries();
+#ifdef TESTNET
+            if (!gBtcPriceFeed.synced)
+            {
+                loadSyntheticBtcPriceSeries(system.epoch, system.initialTick);
+            }
+#endif
+            foldBtcPriceSeriesIntoMiningDigest();
+            gBtcSeriesCheckPending = gBtcPriceFeed.synced;
 
             loadSpectrum();
 
@@ -9551,9 +9913,10 @@ static bool initialize()
     }
 #endif
 
-    // Load + hash-verify the bpp9000 task once at init
-    if (!loadBpp9000Task())
+    // The bpp9000 task data is the BTC price series loaded above
+    if (!setBpp9000TaskDataHash())
     {
+        logToConsole(L"BTC price series missing - node cannot verify mining solutions.");
         return false;
     }
 
@@ -9744,6 +10107,7 @@ static void deinitialize()
     gAntPendingSolutions.deinit();
     AntWalker::stop();
     gAntColony.deinit();
+    gAntTickSolutions.deinit();
 
 #if USE_PARALLEL_K12_LEAVES
     if (parallelK12Leaves.chainingValueBuffer)
@@ -10617,6 +10981,8 @@ static void processKeyPresses()
 
             saveContractExecFeeFiles();
 
+            saveBtcPriceSeries(BTC_PRICE_KIND_F6, 0, system.tick);
+
 #ifdef ENABLE_PROFILING
             gProfilingDataCollector.writeToFile();
 #endif
@@ -11280,12 +11646,13 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     {
                     case ScoreStatusOk:
                         break;
-                    case ScoreStatusTaskNotLoaded:
-                        logToConsole(L"ERROR: bpp9000 task not loaded - node cannot verify mining solutions.");
-                        break;
                     default:
                         logToConsole(L"ERROR: score engine not ready - node cannot verify mining solutions.");
                         break;
+                    }
+                    if (!gBtcPriceFeed.synced)
+                    {
+                        logToConsole(L"ERROR: BTC price series lost - node cannot verify mining solutions.");
                     }
                 }
 
@@ -11688,6 +12055,11 @@ EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable)
                     saveContractStateFiles();
                     saveContractExecFeeFiles();
                     computerMustBeSaved = false;
+                }
+                if (btcPriceSeriesMustBeSaved)
+                {
+                    saveBtcPriceSeries(BTC_PRICE_KIND_SWITCH, system.epoch, system.initialTick);
+                    btcPriceSeriesMustBeSaved = false;
                 }
 
                 if (forceRefreshPeerList)

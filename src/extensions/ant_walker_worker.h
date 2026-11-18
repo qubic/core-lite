@@ -134,19 +134,6 @@ bool ensurePool(const unsigned char* miningSeed)
     return true;
 }
 
-bool loadEmbeddedTask(score_engine::ScoreBpp9000T& engine)
-{
-    // Sized by the file's own header: its population need not match the configured one.
-    const score_task_file::TaskFileHeader* header = (const score_task_file::TaskFileHeader*)BPP9000_TASK_BYTES;
-    const unsigned long long topologyBytes =
-        score_task_file::topologyBytes(header->numInputTrits, header->numOutputTrits, header->population, header->numNeighbors);
-    const unsigned char* topologyBlock = BPP9000_TASK_BYTES + sizeof(score_task_file::TaskFileHeader);
-    const unsigned char* dataBlock = topologyBlock + topologyBytes;
-
-    engine.initMemory();
-    return engine.loadTaskFromMemory(topologyBlock, dataBlock);
-}
-
 // ── worker pool ─────────────────────────────────────────────────────────────────────────────────
 
 struct WorkerPool
@@ -170,12 +157,13 @@ WorkerPool gPoolOfWorkers;
 void runWorker(unsigned int workerIndex)
 {
     score_engine::ScoreBpp9000T* engine = (score_engine::ScoreBpp9000T*)aligned_alloc(64, (sizeof(score_engine::ScoreBpp9000T) + 63) / 64 * 64);
-    if (engine == nullptr || !loadEmbeddedTask(*engine))
+    if (engine == nullptr)
     {
-        fprintf(stderr, "[ant-walker] worker %u could not load the embedded task\n", workerIndex);
+        fprintf(stderr, "[ant-walker] worker %u could not allocate its scorer\n", workerIndex);
         fflush(stderr);
         return;
     }
+    engine->initMemory();
     Ann rootAnn;
     Ann childAnn;
 
@@ -227,8 +215,20 @@ void runWorker(unsigned int workerIndex)
                 parentAnn = (const Ann*)job.parentAnn;
             }
 
-            const score_engine::Rating rating =
-                engine->computeScoreFromParent(*parentAnn, job.parentShift, job.pubkey, job.nonce, job.anchorDigest, gPool);
+            // Same gates as ScoreFunction::computeAntChildScore: bounded targets, the frame stops at the
+            // anchor's shift limit, and a stored parent must be beaten on the same data.
+            const unsigned int windowWidth = (unsigned int)score_engine::ScoreBpp9000T::windowWidth;
+            score_engine::Rating rating = score_engine::Rating::worst();
+            if (job.targetCount >= windowWidth && job.targetCount <= (unsigned int)BPP9000_SEQUENCE_LENGTH
+                && engine->loadTaskTargets(job.targets, job.targetCount))
+            {
+                rating = engine->computeScoreFromParent(*parentAnn, job.parentShift, job.pubkey, job.nonce, job.anchorDigest,
+                    gPool, job.targetCount - windowWidth);
+                if (rating.isValid() && !job.isRoot && !rating.isBetterThan(engine->parentRating))
+                {
+                    rating = score_engine::Rating::worst();
+                }
+            }
             if (!rating.isValid())
             {
                 result.status = AntWalkProto::ResultUnscorable;
@@ -297,7 +297,7 @@ unsigned int validateHello(const AntWalkProto::HelloPayload& hello)
     {
         return AntWalkProto::ReadyVersionMismatch;
     }
-    if (memcmp(hello.topologyHash, BPP9000_TOPOLOGY_HASH, 32) != 0 || memcmp(hello.dataHash, BPP9000_DATA_HASH, 32) != 0)
+    if (memcmp(hello.topologyHash, BPP9000_TOPOLOGY_HASH, 32) != 0)
     {
         return AntWalkProto::ReadyTaskMismatch;
     }

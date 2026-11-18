@@ -137,25 +137,25 @@ add_executable(
 set_target_properties(Qubic PROPERTIES SKIP_BUILD_RPATH TRUE)
 
 # Keep the tracked header used by native MSBuild byte-for-byte in sync with
-# the canonical task without rewriting the source tree during normal builds.
-set(BPP9000_TASK_FILE ${CMAKE_SOURCE_DIR}/data/bpp9000.task)
-set(BPP9000_TASK_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/mining/bpp9000_task.generated.h)
-set(BPP9000_TASK_CHECK_HEADER ${CMAKE_CURRENT_BINARY_DIR}/bpp9000_task.generated.h)
+# the bootstrap file without rewriting the source tree during normal builds.
+set(BTC_PRICE_BOOTSTRAP_FILE ${CMAKE_SOURCE_DIR}/data/btc_price_bootstrap.bin)
+set(BTC_PRICE_BOOTSTRAP_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/extensions/btc_price_bootstrap.generated.h)
 add_custom_target(
-    bpp9000_task_check
+    btc_price_bootstrap_check
     COMMAND ${CMAKE_COMMAND}
-            -DINPUT_FILE=${BPP9000_TASK_FILE}
-            -DOUTPUT_FILE=${BPP9000_TASK_CHECK_HEADER}
-            -DEXPECTED_FILE=${BPP9000_TASK_HEADER}
+            -DINPUT_FILE=${BTC_PRICE_BOOTSTRAP_FILE}
+            -DOUTPUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/btc_price_bootstrap.generated.h
+            -DEXPECTED_FILE=${BTC_PRICE_BOOTSTRAP_HEADER}
+            -DSYMBOL=BTC_PRICE_BOOTSTRAP
             -P ${CMAKE_SOURCE_DIR}/cmake/EmbedBinary.cmake
     DEPENDS
-            ${BPP9000_TASK_FILE}
-            ${BPP9000_TASK_HEADER}
+            ${BTC_PRICE_BOOTSTRAP_FILE}
+            ${BTC_PRICE_BOOTSTRAP_HEADER}
             ${CMAKE_SOURCE_DIR}/cmake/EmbedBinary.cmake
-    COMMENT "Checking embedded bpp9000 task"
+    COMMENT "Checking embedded BTC price bootstrap"
     VERBATIM
 )
-add_dependencies(Qubic bpp9000_task_check)
+add_dependencies(Qubic btc_price_bootstrap_check)
 
 # Explorer asset bundling: regen embedded header when HTML/CSS/JS change.
 if(NOT WIN32)

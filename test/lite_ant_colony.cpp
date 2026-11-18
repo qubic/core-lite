@@ -74,7 +74,7 @@ static long long commitRootChildWithoutAnn(AntColonyBpp9000T* colony, const m256
 TEST(TestAntColonyStore, RecordCommitsWithoutItsNetwork)
 {
     AntColonyBpp9000T* colony = freshColony();
-    ASSERT_NE(colony, nullptr) << "colony init failed; needs ~6.2 GB";
+    ASSERT_NE(colony, nullptr) << colonyInitFailure();
 
     const m256i me = makeKey(30);
     const long long idx = commitRootChildWithoutAnn(colony, me, 3800, 0, 700);
@@ -92,7 +92,7 @@ TEST(TestAntColonyStore, RecordCommitsWithoutItsNetwork)
 TEST(TestAntColonyStore, ClaimThenPublishSuppliesTheNetwork)
 {
     AntColonyBpp9000T* colony = freshColony();
-    ASSERT_NE(colony, nullptr) << "colony init failed; needs ~6.2 GB";
+    ASSERT_NE(colony, nullptr) << colonyInitFailure();
 
     const m256i me = makeKey(31);
     const long long idx = commitRootChildWithoutAnn(colony, me, 3800, 0, 701);
@@ -130,7 +130,7 @@ TEST(TestAntColonyStore, ClaimThenPublishSuppliesTheNetwork)
 TEST(TestAntColonySnapshot, UnmaterialisedRecordsSurviveTheRoundTrip)
 {
     AntColonyBpp9000T* colony = freshColony();
-    ASSERT_NE(colony, nullptr) << "colony init failed; needs ~6.2 GB";
+    ASSERT_NE(colony, nullptr) << colonyInitFailure();
 
     const m256i me = makeKey(32);
     ASSERT_NE(commitRootChild(colony, me, 3800, 0, 800), ANT_INVALID_INDEX);
@@ -187,7 +187,7 @@ static long long commitChildWithoutAnn(AntColonyBpp9000T* colony, const m256i& o
 TEST(TestAntColonyMaintenance, PromoteReleasesAnInheritedClaim)
 {
     AntColonyBpp9000T* colony = freshColony();
-    ASSERT_NE(colony, nullptr) << "colony init failed; needs ~6.2 GB";
+    ASSERT_NE(colony, nullptr) << colonyInitFailure();
 
     const m256i me = makeKey(41);
     const long long idx = commitRootChildWithoutAnn(colony, me, 3800, 0, 901);
@@ -210,7 +210,7 @@ TEST(TestAntColonyMaintenance, PromoteReleasesAnInheritedClaim)
 TEST(TestAntColonyMaintenance, RebuildableOnlyOnceTheParentHasItsNetwork)
 {
     AntColonyBpp9000T* colony = freshColony();
-    ASSERT_NE(colony, nullptr) << "colony init failed; needs ~6.2 GB";
+    ASSERT_NE(colony, nullptr) << colonyInitFailure();
 
     const m256i me = makeKey(42);
     const long long parentIdx = commitRootChildWithoutAnn(colony, me, 3900, 0, 902);
@@ -241,7 +241,7 @@ TEST(TestAntColonyMaintenance, RebuildableOnlyOnceTheParentHasItsNetwork)
 TEST(TestAntColonyMaintenance, AClaimedRecordIsNotOfferedAgain)
 {
     AntColonyBpp9000T* colony = freshColony();
-    ASSERT_NE(colony, nullptr) << "colony init failed; needs ~6.2 GB";
+    ASSERT_NE(colony, nullptr) << colonyInitFailure();
 
     const m256i me = makeKey(43);
     const long long idx = commitRootChildWithoutAnn(colony, me, 3800, 0, 904);
@@ -259,7 +259,7 @@ TEST(TestAntColonyMaintenance, AClaimedRecordIsNotOfferedAgain)
 TEST(TestAntColonyMaintenance, RaisedShiftIsRankedOnce)
 {
     AntColonyBpp9000T* colony = freshColony();
-    ASSERT_NE(colony, nullptr) << "colony init failed; needs ~6.2 GB";
+    ASSERT_NE(colony, nullptr) << colonyInitFailure();
     AntColonyMaintenance::clearRaisedShifts();
 
     const m256i me = makeKey(44);
