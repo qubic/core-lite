@@ -83,7 +83,7 @@ add_executable(
    		qpi_hash_map.cpp
 		qpi_linked_list.cpp
    		revenue.cpp
-   		score.cpp
+		lite_ant_prediction_claim.cpp
    		score_cache.cpp
    		spectrum.cpp
    		stdlib_impl.cpp
@@ -98,6 +98,7 @@ add_executable(
 		oc_engine.cpp
 		oracle_engine.cpp
 		price_feed.cpp
+		prediction_phase.cpp
 		windows_lazy_memory.cpp
 )
 

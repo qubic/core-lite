@@ -262,6 +262,32 @@ public:
         engine.getAntBestANN(outChildAnn);
         return childRating;
     }
+
+    // A network's answer for each hour after the epoch's first frame, BPP9000_SHIFT_CAP trits.
+    void computeAntAnswers(
+        const unsigned long long processor_Number,
+        const score_engine::ScoreBpp9000T::ANN& ann,
+        unsigned char* answers)
+    {
+        const int solutionBufIdx = (int)(processor_Number % solutionBufferCount);
+        LockGuard guard(solutionEngineLock[solutionBufIdx]);
+        _computeBuffer[solutionBufIdx].collectAntOutputs(
+            ann, score_engine::ScoreBpp9000T::windowWidth, score_engine::ScoreBpp9000T::shiftCap, answers);
+    }
+
+    // Lite: outputs of an identity's root on the first frame, windowWidth trits. A node that takes scores on
+    // trust rates the root with them, which costs one replay instead of a walk.
+    void computeAntRootFirstFrameOutputs(
+        const unsigned long long processor_Number,
+        const m256i& publicKey,
+        unsigned char* outputs)
+    {
+        const int solutionBufIdx = (int)(processor_Number % solutionBufferCount);
+        LockGuard guard(solutionEngineLock[solutionBufIdx]);
+        score_engine::ScoreEngineT& engine = _computeBuffer[solutionBufIdx];
+        engine.deriveAntRootANN(publicKey.m256i_u8, poolVec, _antRootScratch[solutionBufIdx]);
+        engine.collectAntOutputs(_antRootScratch[solutionBufIdx], 0, score_engine::ScoreBpp9000T::windowWidth, outputs);
+    }
     // main score function
     unsigned int operator()(const unsigned long long processor_Number, const m256i& publicKey, const m256i& miningSeed, const m256i& nonce)
     {
