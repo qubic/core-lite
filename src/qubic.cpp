@@ -1218,6 +1218,11 @@ static struct {
     unsigned long long lastCheck;
 } autoResendTickVotes;
 
+// Handled by the tick processor. Auto-resend (60 s) only re-sends stored votes; a manual reissue
+// (F9, SPECIAL_COMMAND_REISSUE_VOTE) also creates the first vote if none was sent for this tick.
+static volatile int resendTickVotesRequested = 0;
+static volatile int manualTickVotesReissueRequested = 0;
+
 void logToConsole(const CHAR16* message)
 {
     if (consoleLoggingLevel == 0)
@@ -3089,7 +3094,7 @@ static void processSpecialCommand(Peer* peer, RequestResponseHeader* header)
             break;
             case SPECIAL_COMMAND_REISSUE_VOTE:
             {
-                system.latestCreatedTick--;
+                ATOMIC_STORE32(manualTickVotesReissueRequested, 1);
                 enqueueResponse(peer, sizeof(SpecialCommand), SpecialCommand::type(), header->dejavu(), request); // echo back to indicate success
             }
             break;
@@ -8228,6 +8233,12 @@ static bool signTickVoteRacing(const unsigned char* subseed, const unsigned char
 }
 #endif
 
+// Signed votes of the latest created tick, re-sent unchanged by resendStoredTickVotes()
+static BroadcastTick perIndexBroadcastTick[NUMBER_OF_COMPUTORS];
+static unsigned int storedTickVotesCount = 0;
+static unsigned int storedTickVotesTick = 0;
+static unsigned short storedTickVotesEpoch = 0;
+
 // broadcast all tickVotes from all IDs in this node
 static void broadcastTickVotes()
 {
@@ -8237,7 +8248,6 @@ static void broadcastTickVotes()
     // Phase 3 (enqueueResponse) stay sequential on the ticker;
     // Phase 2 (signTickVote) is dispatched as independent tasks.
     // Each task writes to its own perIndexBroadcastTick[i].signature so workers don't race.
-    static BroadcastTick perIndexBroadcastTick[NUMBER_OF_COMPUTORS];
     static unsigned char perIndexDigest[NUMBER_OF_COMPUTORS][32];
 
     const unsigned int n = numberOfOwnComputorIndices;
@@ -8308,9 +8318,10 @@ static void broadcastTickVotes()
 #endif
     }
 #else
+    const unsigned int n = numberOfOwnComputorIndices;
     BroadcastTick broadcastTick;
     copyMem(&broadcastTick.tick, &etalonTick, sizeof(Tick));
-    for (unsigned int i = 0; i < numberOfOwnComputorIndices; i++)
+    for (unsigned int i = 0; i < n; i++)
     {
         broadcastTick.tick.computorIndex = ownComputorIndices[i] ^ BroadcastTick::type();
         broadcastTick.tick.epoch = system.epoch;
@@ -8336,6 +8347,7 @@ static void broadcastTickVotes()
         KangarooTwelve(&broadcastTick.tick, sizeof(Tick) - SIGNATURE_SIZE, digest, sizeof(digest));
         broadcastTick.tick.computorIndex ^= BroadcastTick::type();
         signTickVote(computorSubseeds[ownComputorIndicesMapping[i]].m256i_u8, computorPublicKeys[ownComputorIndicesMapping[i]].m256i_u8, digest, broadcastTick.tick.signature);
+        copyMem(&perIndexBroadcastTick[i], &broadcastTick, sizeof(broadcastTick));
 
 
         enqueueResponse(NULL, sizeof(broadcastTick), BroadcastTick::type(), 0, &broadcastTick);
@@ -8359,6 +8371,33 @@ static void broadcastTickVotes()
 #endif
     }
 #endif
+    storedTickVotesCount = n;
+    storedTickVotesTick = system.tick;
+    storedTickVotesEpoch = system.epoch;
+}
+
+static bool haveStoredTickVotes()
+{
+    return storedTickVotesTick == system.tick && storedTickVotesEpoch == system.epoch;
+}
+
+// Re-send the votes of the current tick unchanged. A rebuilt vote can differ from the first one (e.g. in
+// expectedNextTickTransactionDigest after a timeout discard) and receivers keep only the first one.
+// Returns false if no votes of the current tick are stored. Tick processor only.
+static bool resendStoredTickVotes()
+{
+    if (!haveStoredTickVotes())
+    {
+        return false;
+    }
+    if (isMainMode())
+    {
+        for (unsigned int i = 0; i < storedTickVotesCount; i++)
+        {
+            enqueueResponse(NULL, sizeof(BroadcastTick), BroadcastTick::type(), 0, &perIndexBroadcastTick[i]);
+        }
+    }
+    return true;
 }
 
 // count the votes of current tick (system.tick) and compare it with etalonTick
@@ -8457,7 +8496,7 @@ static void tryResendTickVotes()
         // - on the last tick, this node was in MAIN mode
         if (elapsed >= autoResendTickVotes.MAX_WAITING_TIME && (autoResendTickVotes.lastTickMode == 1))
         {
-            if (system.latestCreatedTick > 0) system.latestCreatedTick--;
+            ATOMIC_STORE32(resendTickVotesRequested, 1);
             autoResendTickVotes.lastCheck = __rdtsc();
         }
     }
@@ -8796,6 +8835,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
 
     loadAllNodeStateFromFile = false;
     unsigned int latestProcessedTick = 0;
+    unsigned long long lastInitialTickVotesResend = 0;
     while (!shutDownNode)
     {
         if (gracefulShutdownRequested.load(std::memory_order_acquire))
@@ -8932,6 +8972,26 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                 // safety check for contract locks
                 // after processing a tick, all contract locks should be released
                 checkAllContractLocksReleased();
+            }
+
+            // read and clear the requests (ATOMIC_STORE32 returns the previous value)
+            const bool manualReissue = ATOMIC_STORE32(manualTickVotesReissueRequested, 0);
+            const bool autoResend = ATOMIC_STORE32(resendTickVotesRequested, 0);
+            if (manualReissue || autoResend)
+            {
+                // Only a manual reissue may create a vote (none sent for this tick yet, e.g. AUX when it was created),
+                // never the auto-resend: after a MAIN/AUX handover that could add a second, different vote.
+                if (!resendStoredTickVotes() && manualReissue && system.latestCreatedTick >= system.tick)
+                {
+                    system.latestCreatedTick = system.tick - 1;
+                }
+            }
+
+            // While on the initial tick, re-send the stored votes once per second (frequency = TSC ticks per second)
+            if (system.tick == system.initialTick && curTimeTick - lastInitialTickVotesResend >= frequency)
+            {
+                lastInitialTickVotesResend = curTimeTick;
+                resendStoredTickVotes();
             }
 
             if (gFutureTickTotalNumberOfComputors > NUMBER_OF_COMPUTORS - QUORUM)
@@ -9240,7 +9300,7 @@ static void tickProcessor(void*, unsigned long long processorNumber)
                     }
 
 
-                    if (system.tick > system.latestCreatedTick || system.tick == system.initialTick)
+                    if (system.tick > system.latestCreatedTick || (system.tick == system.initialTick && !haveStoredTickVotes()))
                     {
                         if (isMainMode())
                         {
@@ -11428,13 +11488,13 @@ static void processKeyPresses()
 
         /*
         * F9 Key
-        * By Pressing the F9 Key the latestCreatedTick got's decreased by one.
-        * By decreasing this by one, the Node will resend the issued votes for its Computors.
+        * By Pressing the F9 Key the Node resends the issued votes for its Computors (unchanged, see resendStoredTickVotes()),
+        * or creates them if this node has not sent votes for the current tick yet (e.g. it was AUX until now).
         */
         case 0x13:
         {
             logToConsole(L"Pressed F9 key");
-            if (system.latestCreatedTick > 0) system.latestCreatedTick--;
+            ATOMIC_STORE32(manualTickVotesReissueRequested, 1);
         }
         break;
 

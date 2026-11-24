@@ -354,13 +354,19 @@ protected:
         }
 #endif
         auto sz = asyncLoad(pageName, pageSize, (unsigned char*)cache[cache_page_id], pageDir);
+#endif
         if (sz != pageSize)
         {
-#if !defined(NDEBUG)
+#if !defined(NDEBUG) && (!defined(NO_UEFI) || defined(REAL_NODE))
             addDebugMessage(L"Failed to load virtualMemory from disk");
 #endif
+            // A failed/partial load may leave corrupt data in the slot; clear its page id
+            // (reset()'s -1 sentinel) so findCachePage() won't serve it.
+            cachePageId[cache_page_id] = (unsigned long long)-1;
             return -1;
         }
+        // The node defines NO_UEFI too; only the unit-test build has stamped the slot above.
+#if !defined(NO_UEFI) || defined(REAL_NODE)
         lastAccessedTimestamp[cache_page_id] = now_ms();
 #endif
         cachePageId[cache_page_id] = pageId;
