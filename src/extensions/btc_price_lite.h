@@ -25,11 +25,11 @@ static void loadSyntheticBtcPriceSeries(unsigned short epoch, unsigned int initi
         return;
     }
 
-    static unsigned char steps[BTC_PRICE_MIN_POINTS];
+    // The hash returns no more than its own state per call, so the steps are drawn 32 at a time, numbered in the seed.
+    unsigned char steps[32];
     unsigned char seed[32] = { 0 };
     copyMem(seed, "lite-testnet-btc-series", 23);
     copyMem(seed + 24, &epoch, sizeof(epoch));
-    KangarooTwelve(seed, sizeof(seed), steps, sizeof(steps));
 
     BtcPriceImage& image = gBtcPriceFeedIoBuffer.image;
     setMem(&image, sizeof(image), 0);
@@ -38,8 +38,14 @@ static void loadSyntheticBtcPriceSeries(unsigned short epoch, unsigned int initi
     long long priceE8 = 60000LL * BTC_FEED_PRICE_SCALE;
     for (unsigned int i = 0; i < BTC_PRICE_MIN_POINTS; i++)
     {
+        if (i % sizeof(steps) == 0)
+        {
+            const unsigned int stepBlock = i / (unsigned int)sizeof(steps);
+            copyMem(seed + 28, &stepBlock, sizeof(stepBlock));
+            KangarooTwelve(seed, sizeof(seed), steps, sizeof(steps));
+        }
         // Steps of up to 128 USDT keep the walk far from zero over a year.
-        priceE8 += ((long long)steps[i] - 128) * BTC_FEED_PRICE_SCALE;
+        priceE8 += ((long long)steps[i % sizeof(steps)] - 128) * BTC_FEED_PRICE_SCALE;
         if (priceE8 < BTC_FEED_PRICE_SCALE)
         {
             priceE8 = BTC_FEED_PRICE_SCALE;
