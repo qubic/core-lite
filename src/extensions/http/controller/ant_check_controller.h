@@ -55,22 +55,25 @@ static RpcResp antCheckStatus(const char* status, int httpStatus = 200)
     return jsonResp(json, httpStatus);
 }
 
-// Stored solutions of one tick (tick, optional index) or of one identity (identity, optional nonce), paged by
-// record index. Reads the store without a lock, as every off-thread reader of it does.
+// Stored solutions of one tick (tick, optional index) or of one identity (identity, optional nonce). The scan
+// starts at recordIndexFrom, skips the first offset matches and returns up to limit. Reads the store without a
+// lock, as every off-thread reader of it does.
 RPC_ROUTE("GET", "/v1/ant-solutions")
 {
     const std::string identityText = req.getParameter("identity");
     const std::string nonceText = req.getParameter("nonce");
     const std::string tickText = req.getParameter("tick");
     const std::string indexText = req.getParameter("index");
-    const std::string fromText = req.getParameter("from");
+    const std::string recordIndexFromText = req.getParameter("recordIndexFrom");
+    const std::string offsetText = req.getParameter("offset");
     const std::string limitText = req.getParameter("limit");
 
     m256i identityKey = m256i::zero();
     m256i nonce = m256i::zero();
     unsigned int tick = 0;
     unsigned int index = 0;
-    unsigned int from = 0;
+    unsigned int recordIndexFrom = 0;
+    unsigned int offset = 0;
     unsigned int limit = ANT_IDENTITY_TREE_NODES_PER_RESPONSE;
 
     const bool parametersValid = (!identityText.empty() || !tickText.empty())
@@ -78,7 +81,8 @@ RPC_ROUTE("GET", "/v1/ant-solutions")
         && (nonceText.empty() || antParseHex(nonceText, nonce.m256i_u8, 32))
         && (tickText.empty() || antParseUnsigned(tickText, tick))
         && (indexText.empty() || antParseUnsigned(indexText, index))
-        && (fromText.empty() || antParseUnsigned(fromText, from))
+        && (recordIndexFromText.empty() || antParseUnsigned(recordIndexFromText, recordIndexFrom))
+        && (offsetText.empty() || antParseUnsigned(offsetText, offset))
         && (limitText.empty() || (antParseUnsigned(limitText, limit) && limit >= 1 && limit <= ANT_IDENTITY_TREE_NODES_PER_RESPONSE));
     if (!parametersValid)
     {
@@ -98,9 +102,9 @@ RPC_ROUTE("GET", "/v1/ant-solutions")
     }
 
     Json::Value solutions(Json::arrayValue);
-    unsigned int recordIndex = std::max(from, rangeStart);
-    unsigned int scanned = 0;
-    while (recordIndex < rangeEnd && solutions.size() < limit && scanned < ANT_IDENTITY_TREE_SCAN_BUDGET)
+    unsigned int recordIndex = std::max(recordIndexFrom, rangeStart);
+    unsigned int matchesToSkip = offset;
+    while (recordIndex < rangeEnd && solutions.size() < limit)
     {
         const AntSolutionRecord* record = gAntColony.recordAt(recordIndex);
         if (record == nullptr)
@@ -108,12 +112,15 @@ RPC_ROUTE("GET", "/v1/ant-solutions")
             recordIndex = rangeEnd;
             break;
         }
-        scanned++;
 
         const bool matches = (identityText.empty() || record->pubkey == identityKey)
             && (nonceText.empty() || record->nonce == nonce)
             && (indexText.empty() || record->selfRef.solutionIndexInTick == index);
-        if (matches)
+        if (matches && matchesToSkip > 0)
+        {
+            matchesToSkip--;
+        }
+        else if (matches)
         {
             solutions.append(antCheckRecordJson(recordIndex, *record));
         }
@@ -123,7 +130,7 @@ RPC_ROUTE("GET", "/v1/ant-solutions")
     Json::Value result;
     result["epoch"] = (unsigned int)system.epoch;
     result["nodeVerifiesScores"] = antNodeVerifiesEveryScore();
-    result["nextFrom"] = (recordIndex < rangeEnd) ? recordIndex : 0u;
+    result["nextRecordIndexFrom"] = (recordIndex < rangeEnd) ? recordIndex : 0u;
     result["solutions"] = solutions;
     return jsonResp(result);
 }

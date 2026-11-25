@@ -15,8 +15,9 @@
 //                A child names its parent by that address, so the parent's `tick` and `index` are the
 //                request's parentTick and parentIndex. A first-generation solution has no stored parent:
 //                use parentTick 0 and parentIndex 4294967295.
-//   recordIndex  The solution's position in that node's store. It is only the paging cursor of
-//                /v1/ant-solutions (`from`, `nextFrom`). It is never part of a score request.
+//   recordIndex  The solution's position in that node's store. /v1/ant-solutions starts its scan at
+//                `recordIndexFrom`, skips the first `offset` matches and returns up to `limit`. It is never
+//                part of a score request.
 //   anchorTick   A recent tick the node still remembers the digest of. Without --anchor-tick the script
 //                starts just below the node's current tick and steps back until the node accepts one.
 //   nonce        32 bytes. Byte 0 is the algorithm tag (1). Byte 1 is `L | 0x20`, L from 1 to 10 (wiring
@@ -107,21 +108,21 @@ async function getJson(url: string): Promise<{ httpStatus: number; body: any }> 
   }
 }
 
-// Reads every page of /v1/ant-solutions: `nextFrom` of one reply is the `from` of the next, 0 ends it.
+// Reads every page of /v1/ant-solutions: `nextRecordIndexFrom` of one reply is the `recordIndexFrom` of the next, 0 ends it.
 async function listSolutions(node: string, query: Record<string, string | number>): Promise<{ solutions: StoredSolution[]; verifies: boolean }> {
   const solutions: StoredSolution[] = []
   let verifies = false
-  let from = 0
+  let recordIndexFrom = 0
   do {
-    const parameters = new URLSearchParams({ ...query, from: String(from) } as Record<string, string>)
+    const parameters = new URLSearchParams({ ...query, recordIndexFrom: String(recordIndexFrom) } as Record<string, string>)
     const { httpStatus, body } = await getJson(`${node}/v1/ant-solutions?${parameters}`)
     if (httpStatus !== 200) {
       fail(`/v1/ant-solutions answered HTTP ${httpStatus}: ${JSON.stringify(body)}`)
     }
     solutions.push(...body.solutions)
     verifies = body.nodeVerifiesScores
-    from = body.nextFrom
-  } while (from !== 0)
+    recordIndexFrom = body.nextRecordIndexFrom
+  } while (recordIndexFrom !== 0)
   return { solutions, verifies }
 }
 
