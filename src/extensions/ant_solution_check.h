@@ -6,7 +6,7 @@
 
 // Identity allowed to ask for a score. Empty turns the compute endpoint off.
 #ifndef ANT_CHECK_GUARDIAN_IDENTITY
-#define ANT_CHECK_GUARDIAN_IDENTITY ""
+#define ANT_CHECK_GUARDIAN_IDENTITY "MKPYRHUKEHUTBBTNUTPVQOUDNAODJZQTFRWAEUBNRGSGEUCRFKBNKUVGJLOL"
 #endif
 
 // Signed bytes: publicKey[32] | nonce[32] | anchorTick | parentTick | parentIndex, the numbers 32-bit little-endian.

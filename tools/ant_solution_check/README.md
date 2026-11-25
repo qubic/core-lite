@@ -1,10 +1,5 @@
 # Ant solution check
 
-Two HTTP endpoints on the lite node, for the guardian team. Use them to see what a node stored
-for a solution, and to make a node score a solution in front of you.
-
-A node that takes scores on trust cannot answer the second one. That is the point.
-
 Examples use `http://NODE:41841`. All calls are GET.
 
 ## 1. Look up stored solutions
@@ -57,7 +52,7 @@ curl "http://NODE:41841/v1/ant-solutions?tick=92260029"
 
 What to look at:
 
-- `nodeVerifiesScores`: false means this node trusts claimed scores (AUX without `--fv`).
+- `nodeVerifiesScores`: false means this node trusts claimed scores (AUX without `--fv` aka skipping trick).
 - `trustedAtCommit`: true means the node stored this solution without walking it.
 - `networkHeld`: false means the node has no network for it, so it cannot score its children.
 - `tick` + `index` is the solution's address. A child points at its parent with `parentTick` + `parentIndex`.
@@ -94,21 +89,18 @@ digest    = KangarooTwelve(message), 32 bytes
 signature = sign(guardian seed, digest)
 ```
 
-Reply when it worked:
+Reply when the walk finished:
 
 ```json
-{ "status": "ok", "score": 4602, "shift": 0, "networkHash": 2923967924, "cached": false, "walkMs": 27871 }
+{ "status": "ok", "score": 4602, "shift": 0, "networkHash": 2923967924, "walkMs": 27871 }
 ```
 
-`cached: true` means the node already had this result and did not walk again. `walkMs` is only
-there when it walked. The call returns when the walk is done, so give it time (seconds to tens of
-seconds, depending on the CPU).
-
+`ok` means the node walked, and these are the numbers the walk ended with.
 Other replies:
 
 | `status` | HTTP | Meaning |
 |---|---|---|
-| `no-score` | 200 | walked but no valid score (for example it did not beat the parent), or the nonce is not valid |
+| `no-score` | 200 | no numbers exist: the nonce is not valid, the parent is beyond the data of that anchor tick, or the walk timed out |
 | `node-trusts-scores` | 200 | this node does not verify scores, it computed nothing |
 | `anchor-unavailable` | 200 | the node does not have that tick's digest (empty tick, too old, or in the future) |
 | `parent-unknown` | 200 | no stored solution at that parent address |
@@ -139,16 +131,3 @@ bun check.ts verify  --node http://NODE:41841 --identity MINER_ID --parent-tick 
 - `recheck` takes a stored solution, asks the node to score it again and compares. It prints `match` or `MISMATCH`.
 - `verify` sends a fresh random nonce as a child of the parent you name. It picks a recent anchor tick itself.
   Add `--nonce` and `--anchor-tick` to repeat an exact request.
-
-## Good to know
-
-- The guardian identity is compiled in: `ANT_CHECK_GUARDIAN_IDENTITY` in `src/extensions/ant_solution_check.h`.
-  Empty means `/v1/ant-score` answers `disabled`.
-- A node usually has its own solutions in cache, so `recheck` often comes back with `cached: true`.
-  To force a real walk use `verify`: a fresh nonce cannot be in any cache.
-- To catch a node that skips walking: pick a recent stored solution as parent and run `verify`.
-  A node that really holds the parent's network answers `ok` or `no-score` with a `walkMs`.
-  A trusting node answers `node-trusts-scores`. A node that trusted that parent earlier and never
-  walked it answers `parent-network-not-held`.
-- One score request runs at a time. It uses its own scoring engine at low priority, so it does not hold up the node.
-- Stored solutions are gone after the epoch ends.

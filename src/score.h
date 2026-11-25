@@ -226,7 +226,9 @@ public:
         const m256i& publicKey,
         const m256i& nonce,
         const m256i& anchorDigest,
-        score_engine::ScoreBpp9000T::ANN& outChildAnn)
+        score_engine::ScoreBpp9000T::ANN& outChildAnn,
+        // Lite: what the walk ended with, also when that earns no score. outChildAnn holds that network then.
+        score_engine::Rating* outWalkRating = nullptr)
     {
         const int solutionBufIdx = (processor_Number == RESERVED_ENGINE) ? (int)solutionBufferCount : (int)(processor_Number % solutionBufferCount);
         LockGuard guard(solutionEngineLock[solutionBufIdx]);
@@ -255,6 +257,11 @@ public:
 
         const score_engine::Rating childRating = engine.computeAntScoreFromParent(
             *parent, parentShift, shiftLimit, publicKey.m256i_u8, nonce.m256i_u8, anchorDigest.m256i_u8, poolVec);
+        if (outWalkRating != nullptr && childRating.isValid())
+        {
+            *outWalkRating = childRating;
+            engine.getAntBestANN(outChildAnn);
+        }
         if (!childRating.isValid())
         {
             return childRating;

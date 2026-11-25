@@ -570,3 +570,77 @@ TEST(TestAntSolutionCheck, ReservedEngineScoresLikeAProcessorEngine)
         EXPECT_EQ(memcmp(reservedChild.get(), processorChild.get(), sizeof(*processorChild)), 0);
     }
 }
+
+// A solution check shows what the walk ended with even when the child earns no score, and asking for that
+// must not change what the scoring path itself returns or writes.
+TEST(TestAntSolutionCheck, WalkRatingIsReportedWhenTheChildDoesNotBeatItsParent)
+{
+    AntFixture f;
+    ASSERT_TRUE(makeAntFixture(f));
+    std::vector<m256i> seeds;
+    std::vector<m256i> pubkeys;
+    std::vector<m256i> nonces;
+    loadSamples(seeds, pubkeys, nonces, 1);
+    ASSERT_FALSE(seeds.empty());
+
+    const unsigned int targetCount = (unsigned int)AntCfg::windowWidth + 3;
+    const std::vector<unsigned char> targets(f.engine->targetOutputs, f.engine->targetOutputs + AntCfg::sequenceLength);
+
+    auto scoreFunction = std::make_unique<ScoreFunction<1>>();
+    scoreFunction->initMemory();
+    scoreFunction->initMiningData(seeds[0]);
+
+    const m256i pk = makePubkey(41);
+    const m256i anchor = makePubkey(42);
+    auto parentAnn = std::make_unique<AntEngine::ANN>();
+    const score_engine::Rating parentRating =
+        scoreFunction->computeAntChildScore(0, nullptr, 0, targets.data(), targetCount, pk, makeAntNonce(3, 0, 43), anchor, *parentAnn);
+    ASSERT_TRUE(parentRating.isValid());
+
+    auto untouched = std::make_unique<AntEngine::ANN>();
+    memset(untouched.get(), 0xA5, sizeof(*untouched));
+    auto walkAnn = std::make_unique<AntEngine::ANN>();
+    auto scoreAnn = std::make_unique<AntEngine::ANN>();
+
+    // Explore steps move away from the parent, so such a child often fails to beat it; without them it often does.
+    bool sawNoScore = false;
+    bool sawScore = false;
+    for (unsigned char tag = 60; tag < 66 && !(sawNoScore && sawScore); tag++)
+    {
+        const m256i childNonce = makeAntNonce(3, (tag % 2 == 0) ? 255 : 0, tag);
+
+        memcpy(walkAnn.get(), untouched.get(), sizeof(*walkAnn));
+        score_engine::Rating walkRating = score_engine::Rating::worst();
+        const score_engine::Rating withWalk = scoreFunction->computeAntChildScore(0, parentAnn.get(), parentRating.shift, targets.data(),
+            targetCount, pk, childNonce, anchor, *walkAnn, &walkRating);
+        ASSERT_TRUE(walkRating.isValid());
+        if ((withWalk.isValid() && sawScore) || (!withWalk.isValid() && sawNoScore))
+        {
+            continue;
+        }
+
+        memcpy(scoreAnn.get(), untouched.get(), sizeof(*scoreAnn));
+        const score_engine::Rating plain = scoreFunction->computeAntChildScore(0, parentAnn.get(), parentRating.shift, targets.data(),
+            targetCount, pk, childNonce, anchor, *scoreAnn);
+        EXPECT_EQ(plain.error, withWalk.error);
+        EXPECT_EQ(plain.shift, withWalk.shift);
+
+        if (withWalk.isValid())
+        {
+            sawScore = true;
+            EXPECT_EQ(walkRating.error, withWalk.error);
+            EXPECT_EQ(walkRating.shift, withWalk.shift);
+            EXPECT_EQ(memcmp(walkAnn.get(), scoreAnn.get(), sizeof(*walkAnn)), 0);
+        }
+        else
+        {
+            sawNoScore = true;
+            // The walk starts from the parent's own rating and never ends below it.
+            EXPECT_EQ(walkRating.error, parentRating.error);
+            EXPECT_EQ(walkRating.shift, parentRating.shift);
+            EXPECT_NE(memcmp(walkAnn.get(), untouched.get(), sizeof(*walkAnn)), 0);
+            EXPECT_EQ(memcmp(scoreAnn.get(), untouched.get(), sizeof(*scoreAnn)), 0);
+        }
+    }
+    EXPECT_TRUE(sawNoScore) << "no child failed to beat its parent, the case under test did not run";
+}

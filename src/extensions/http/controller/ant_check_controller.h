@@ -171,29 +171,27 @@ struct AntCheckLowPriority
 };
 #endif
 
-static RpcResp antCheckScoreReply(const score_engine::Rating& rating, const AntColonyBpp9000T::Ann& childAnn, bool cached, long long walkMs)
+// walkRating is what the walk ended with, whether or not that would earn the solution a score on chain.
+static RpcResp antCheckScoreReply(const score_engine::Rating& walkRating, const AntColonyBpp9000T::Ann& walkAnn, long long walkMs)
 {
     Json::Value json;
-    json["status"] = rating.isValid() ? "ok" : "no-score";
-    json["cached"] = cached;
-    if (rating.isValid())
+    json["status"] = walkRating.isValid() ? "ok" : "no-score";
+    if (walkRating.isValid())
     {
         unsigned int networkHash = 0;
-        KangarooTwelve(&childAnn, sizeof(childAnn), &networkHash, sizeof(networkHash));
-        json["score"] = rating.error;
-        json["shift"] = rating.shift;
+        KangarooTwelve(&walkAnn, sizeof(walkAnn), &networkHash, sizeof(networkHash));
+        json["score"] = walkRating.error;
+        json["shift"] = walkRating.shift;
         json["networkHash"] = networkHash;
     }
-    if (!cached)
-    {
-        json["walkMs"] = (Json::Int64)walkMs;
-    }
+    json["walkMs"] = (Json::Int64)walkMs;
     return jsonResp(json);
 }
 
-// Scores one child of a stored parent for the guardian identity, the way an incoming solution is scored, and
-// changes nothing but the score cache. It walks on the engine no node thread maps to and reads the anchor from
-// the recent-ticks ring only, so it holds nothing the tick or request processors wait for.
+// Walks one child of a stored parent for the guardian identity, the way an incoming solution is walked, and
+// changes no node state: every request is a real walk, never an answer from the score cache. It walks on the
+// engine no node thread maps to and reads the anchor from the recent-ticks ring only, so it holds nothing the
+// tick or request processors wait for.
 RPC_ROUTE("GET", "/v1/ant-score")
 {
     static m256i guardianKey = m256i::zero();
@@ -259,13 +257,6 @@ RPC_ROUTE("GET", "/v1/ant-score")
         return antCheckStatus("parent-network-not-held");
     }
 
-    const AntColonyBpp9000T::ReplayKey replayKey = makeAntReplayKey(publicKey, nonce, parentRef, anchorDigest);
-    score_engine::Rating rating = score_engine::Rating::worst();
-    if (gAntColony.tryGetReplayScore(replayKey, rating, *childAnn))
-    {
-        return antCheckScoreReply(rating, *childAnn, true, 0);
-    }
-
     std::vector<unsigned char> targets(BPP9000_SEQUENCE_LENGTH);
     unsigned int shiftLimit = 0;
     unsigned int baseHour = 0;
@@ -282,19 +273,18 @@ RPC_ROUTE("GET", "/v1/ant-score")
         return antCheckStatus("busy", 429);
     }
 
+    score_engine::Rating walkRating = score_engine::Rating::worst();
     const auto walkStart = std::chrono::steady_clock::now();
     {
 #ifdef __linux__
         const AntCheckLowPriority lowPriority;
 #endif
-        rating = score->computeAntChildScore(score->RESERVED_ENGINE, (parentRecord != nullptr) ? parentAnn.get() : nullptr, parentShift,
-            targets.data(), targetCount, publicKey, nonce, anchorDigest, *childAnn);
+        score->computeAntChildScore(score->RESERVED_ENGINE, (parentRecord != nullptr) ? parentAnn.get() : nullptr, parentShift, targets.data(),
+            targetCount, publicKey, nonce, anchorDigest, *childAnn, &walkRating);
     }
-    // Kept whatever the outcome: the walk is deterministic, so the same request never walks twice.
-    gAntColony.putReplayScore(replayKey, rating, *childAnn);
     const long long walkMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - walkStart).count();
 
-    return antCheckScoreReply(rating, *childAnn, false, walkMs);
+    return antCheckScoreReply(walkRating, *childAnn, walkMs);
 }
 
 #endif // __linux__ || LITE_WASM_SC
