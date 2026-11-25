@@ -10161,6 +10161,7 @@ static bool initialize()
             etalonTick.year = system.initialYear;
 
             writeEmbeddedBtcPriceBootstrap();
+            writeEmbeddedBtcPriceSeries();
             loadBtcPriceSeries();
 #ifdef TESTNET
             if (!gBtcPriceFeed.synced)
