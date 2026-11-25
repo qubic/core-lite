@@ -225,7 +225,7 @@ static constexpr unsigned int ANT_MAX_CHILDREN_PER_PARENT = 0;
 #if defined(TESTNET) && defined(TESTNET_LITE_RAM)
 static constexpr unsigned int ANT_MAX_NODES_PER_EPOCH = 1u << 16;
 #else
-static constexpr unsigned int ANT_MAX_NODES_PER_EPOCH = 1u << 23;
+static constexpr unsigned int ANT_MAX_NODES_PER_EPOCH = (1u << 23) * 3 / 2;
 #endif
 
 // Ant colony: replay-cache entries, scores this node already computed so a restart does not
