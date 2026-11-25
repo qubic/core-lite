@@ -48,6 +48,8 @@ static constexpr unsigned int WORST_SCORE = 0xFFFFFFFFU;
 // so annOfNonRoot()'s bounds check already reads them as "no network". MATERIALISING is a walk in progress.
 static constexpr unsigned int ANT_ANN_UNMATERIALISED = 0xFFFFFFFFU;
 static constexpr unsigned int ANT_ANN_MATERIALISING = 0xFFFFFFFEU;
+// AntSolutionRecord::padding of a record whose score was taken on trust. Stays after its network is filled in.
+static constexpr unsigned int ANT_RECORD_TRUSTED_AT_COMMIT = 1;
 static constexpr long long ANT_INVALID_INDEX = -1;
 
 // Anchor digests for recent ticks, indexed by tick & (size - 1). Smallest power of two holding
@@ -533,6 +535,20 @@ public:
     }
 
     long long findIndexBySolutionRef(const SolutionRef& ref) const;
+
+    // The records committed in one tick, as a run of indices. False when the tick holds none. Any thread.
+    bool tickRun(unsigned int tick, unsigned int& startIdx, unsigned int& count) const
+    {
+        unsigned int tickSlot = 0;
+        if (!slotOf(tick, tickSlot))
+        {
+            return false;
+        }
+        const AntTickSlot& slot = _tickIndex[tickSlot];
+        count = slot.count;
+        startIdx = slot.startIdx;
+        return count != 0;
+    }
 
     // Constraint specific functions
 
@@ -1339,7 +1355,7 @@ inline ValidityResult AntColony<ScoreT>::commit(const AntCommitInput& in, const 
     newRec.childAnnHash = childAnnHash;
     newRec.annStateSlot = (childAnn != nullptr) ? newIdx : ANT_ANN_UNMATERIALISED;
     newRec.nextSiblingIdx = prevHead;
-    newRec.padding = 0;
+    newRec.padding = trustedScore ? ANT_RECORD_TRUSTED_AT_COMMIT : 0;
 
     AntTickSlot& tslot = _tickIndex[selfSlot];
     if (tslot.count == 0)

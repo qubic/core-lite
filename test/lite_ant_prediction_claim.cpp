@@ -520,3 +520,53 @@ TEST(TestAntPredictionClaimWalk, TimedOutSlideLeavesTheFrameMoved)
         << std::endl;
     EXPECT_GT(movedPastTheFloor, 0u);
 }
+
+// The engine kept for on-demand solution checks must score exactly like the ones processors map to.
+TEST(TestAntSolutionCheck, ReservedEngineScoresLikeAProcessorEngine)
+{
+    AntFixture f;
+    ASSERT_TRUE(makeAntFixture(f));
+    std::vector<m256i> seeds;
+    std::vector<m256i> pubkeys;
+    std::vector<m256i> nonces;
+    loadSamples(seeds, pubkeys, nonces, 1);
+    ASSERT_FALSE(seeds.empty());
+
+    const unsigned int targetCount = (unsigned int)AntCfg::windowWidth + 3;
+    const std::vector<unsigned char> targets(f.engine->targetOutputs, f.engine->targetOutputs + AntCfg::sequenceLength);
+
+    auto scoreFunction = std::make_unique<ScoreFunction<1>>();
+    scoreFunction->initMemory();
+    scoreFunction->initMiningData(seeds[0]);
+
+    const m256i pk = makePubkey(41);
+    const m256i nonce = makeAntNonce(3, 0, 43);
+    const m256i anchor = makePubkey(42);
+    auto processorAnn = std::make_unique<AntEngine::ANN>();
+    auto reservedAnn = std::make_unique<AntEngine::ANN>();
+
+    const score_engine::Rating onProcessor =
+        scoreFunction->computeAntChildScore(0, nullptr, 0, targets.data(), targetCount, pk, nonce, anchor, *processorAnn);
+    const score_engine::Rating onReserved = scoreFunction->computeAntChildScore(ScoreFunction<1>::RESERVED_ENGINE, nullptr, 0, targets.data(),
+        targetCount, pk, nonce, anchor, *reservedAnn);
+
+    ASSERT_TRUE(onProcessor.isValid());
+    EXPECT_EQ(onReserved.error, onProcessor.error);
+    EXPECT_EQ(onReserved.shift, onProcessor.shift);
+    EXPECT_EQ(memcmp(reservedAnn.get(), processorAnn.get(), sizeof(*processorAnn)), 0);
+
+    // A child of that network, so the reserved engine is also fed a stored parent.
+    const m256i childNonce = makeAntNonce(3, 0, 44);
+    auto processorChild = std::make_unique<AntEngine::ANN>();
+    auto reservedChild = std::make_unique<AntEngine::ANN>();
+    const score_engine::Rating childOnProcessor = scoreFunction->computeAntChildScore(0, processorAnn.get(), onProcessor.shift, targets.data(),
+        targetCount, pk, childNonce, anchor, *processorChild);
+    const score_engine::Rating childOnReserved = scoreFunction->computeAntChildScore(ScoreFunction<1>::RESERVED_ENGINE, processorAnn.get(),
+        onProcessor.shift, targets.data(), targetCount, pk, childNonce, anchor, *reservedChild);
+    EXPECT_EQ(childOnReserved.error, childOnProcessor.error);
+    EXPECT_EQ(childOnReserved.shift, childOnProcessor.shift);
+    if (childOnProcessor.isValid())
+    {
+        EXPECT_EQ(memcmp(reservedChild.get(), processorChild.get(), sizeof(*processorChild)), 0);
+    }
+}

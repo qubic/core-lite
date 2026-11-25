@@ -268,5 +268,6 @@ RPC_ROUTE("GET", "/set-operator-seed")
 #include "extensions/http/controller/rpc_stats_controller.h"
 #include "extensions/http/controller/rpc_live_controller.h"
 #include "extensions/http/controller/rpc_queryv2_controller.h"
+#include "extensions/http/controller/ant_check_controller.h"
 
 #endif // __linux__ || LITE_WASM_SC

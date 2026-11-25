@@ -54,13 +54,17 @@ private:
     // The engine scratch buffers and the locks guarding them. Private on purpose: a work function run
     // by the task queue cannot reach them, so it cannot take a slot lock and then call a method that
     // takes the same one. Every route into the engine locks exactly once, inside this class.
-    score_engine::ScoreEngineT _computeBuffer[solutionBufferCount];
-    volatile char solutionEngineLock[solutionBufferCount];
+    // Lite: one engine past the ones a processor number can map to, reached only with RESERVED_ENGINE.
+    score_engine::ScoreEngineT _computeBuffer[solutionBufferCount + 1];
+    volatile char solutionEngineLock[solutionBufferCount + 1];
 
     // Scratch for the ant root derivation, one per engine slot and covered by that slot's own lock
-    score_engine::ScoreBpp9000T::ANN _antRootScratch[solutionBufferCount];
+    score_engine::ScoreBpp9000T::ANN _antRootScratch[solutionBufferCount + 1];
 
 public:
+    // Lite: processor number of the engine no node thread maps to, so a walk on it never makes one wait.
+    static constexpr unsigned long long RESERVED_ENGINE = ~0ULL;
+
     volatile char random2PoolLock;
     unsigned char state[score_engine::STATE_SIZE];
     unsigned char externalPoolVec[score_engine::POOL_VEC_PADDING_SIZE];
@@ -109,7 +113,7 @@ public:
         // every compute buffer now that the digest and pool are established.
         if (!isZero(randomSeed))
         {
-            for (unsigned long long i = 0; i < solutionBufferCount; i++)
+            for (unsigned long long i = 0; i < solutionBufferCount + 1; i++)
             {
                 _computeBuffer[i].deriveControlOutput(currentRandomSeed.m256i_u8, poolVec);
             }
@@ -132,12 +136,12 @@ public:
 
         // Make sure all padding data is set as zeros
         setMem(_computeBuffer, sizeof(_computeBuffer), 0);
-        for (int i = 0; i < solutionBufferCount; i++)
+        for (int i = 0; i < solutionBufferCount + 1; i++)
         {
             _computeBuffer[i].initMemory();
         }
 
-        for (int i = 0; i < solutionBufferCount; i++)
+        for (int i = 0; i < solutionBufferCount + 1; i++)
         {
             solutionEngineLock[i] = 0;
         }
@@ -224,7 +228,7 @@ public:
         const m256i& anchorDigest,
         score_engine::ScoreBpp9000T::ANN& outChildAnn)
     {
-        const int solutionBufIdx = (int)(processor_Number % solutionBufferCount);
+        const int solutionBufIdx = (processor_Number == RESERVED_ENGINE) ? (int)solutionBufferCount : (int)(processor_Number % solutionBufferCount);
         LockGuard guard(solutionEngineLock[solutionBufIdx]);
         score_engine::ScoreEngineT& engine = _computeBuffer[solutionBufIdx];
 

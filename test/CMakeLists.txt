@@ -84,6 +84,7 @@ add_executable(
 		qpi_linked_list.cpp
    		revenue.cpp
 		lite_ant_prediction_claim.cpp
+		lite_ant_solution_check.cpp
    		score_cache.cpp
    		spectrum.cpp
    		stdlib_impl.cpp
