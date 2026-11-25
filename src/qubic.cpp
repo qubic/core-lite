@@ -309,7 +309,8 @@ static volatile bool btcPriceSeriesMustBeSaved = false;
 
 static int misalignedState = 0;
 
-static bool forceVerifySolutions = false;
+// Cleared only by --skip-verify-solutions: AUX then takes claimed scores on trust behind a fork checkpoint.
+static bool forceVerifySolutions = true;
 static bool forceBroadcastInvalidSolution = false;
 static bool forceBroadcastAntSolution = false;
 static unsigned int forceAntSolutionBudget = 3;
@@ -12874,7 +12875,6 @@ void processArgs(int argc, const char* argv[]) {
         ("o,operator", "Operator id", cxxopts::value<std::string>())
         ("op,operator-seed", "Lite node seed", cxxopts::value<std::string>())
         ("oa,operator-alias", "Operator alias for RPC tick-info", cxxopts::value<std::string>())
-        ("fv,force-verify-solutions", "Force strict solution verification on every tick", cxxopts::value<bool>())
         ("http-port", "HTTP/RPC server port", cxxopts::value<int>()->default_value("41841"))
         ("static-peers", "Run in static peer mode: no peer churn, no new incoming connections")
         ("swap-compression", "Compress SwapVM disk pages with blosc2 (Linux only)")
@@ -12883,6 +12883,7 @@ void processArgs(int argc, const char* argv[]) {
         ("auto-flush-stuck-seconds", "Seconds stuck on same tick before auto-rewipe tickData and re-fetch from peers (0=off)", cxxopts::value<int>()->default_value("0"))
 #if defined(__linux__) && !defined(LITE_WASM_SC)
         ("rollback-mode", "DEPRECATED: accepted but ignored", cxxopts::value<std::string>()->default_value("fork"))
+        ("skip-verify-solutions", "AUX takes claimed solution scores on trust; a tick the quorum disagrees with is rolled back", cxxopts::value<bool>())
 #endif
         ("max-inbound-per-ip", "Max inbound connections per IP (0=unlimited)", cxxopts::value<int>()->default_value("0"))
         ("max-inbound", "Max inbound connection slots (0=none, -1=all)", cxxopts::value<int>()->default_value("-1"))
@@ -12965,6 +12966,11 @@ void processArgs(int argc, const char* argv[]) {
             logColorToScreen("WARNING", "rollback-mode is deprecated; tick rollback is always fork-on-BSP child-promote now");
     }
     logColorToScreen("INFO", "Tick rollback: fork-on-BSP child-promote");
+    if (result.count("skip-verify-solutions"))
+    {
+        forceVerifySolutions = false;
+        logColorToScreen("INFO", "Skip verify solutions enabled: AUX trusts claimed solution scores");
+    }
     if (result.count("verify-fork-rollback"))
     {
         gVerifyForkRollback = true;
@@ -13282,12 +13288,6 @@ void processArgs(int argc, const char* argv[]) {
             std::cerr << std::endl;
             exit(1);
         }
-    }
-
-    if (result.count("force-verify-solutions"))
-    {
-        forceVerifySolutions = true;
-        logColorToScreen("INFO", "Force verify solutions enabled");
     }
 
     if (result.count("force-broadcast-invalid-solution"))

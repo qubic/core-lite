@@ -52,7 +52,7 @@ curl "http://NODE:41841/v1/ant-solutions?tick=92260029"
 
 What to look at:
 
-- `nodeVerifiesScores`: false means this node trusts claimed scores (AUX without `--fv` aka skipping trick).
+- `nodeVerifiesScores`: false means this node trusts claimed scores (AUX started with `--skip-verify-solutions`, aka skipping trick).
 - `trustedAtCommit`: true means the node stored this solution without walking it.
 - `networkHeld`: false means the node has no network for it, so it cannot score its children.
 - `tick` + `index` is the solution's address. A child points at its parent with `parentTick` + `parentIndex`.
