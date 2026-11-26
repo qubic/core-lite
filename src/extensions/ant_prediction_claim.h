@@ -14,6 +14,9 @@ static constexpr unsigned char PREDICTION_ANSWER_NOT_COMPUTED = 3;
 // accuracy keys are not the quorum's from then on.
 static bool gPredictionAnswersIncomplete = false;
 
+// Set for the whole run by --skip-verify-solutions: a score taken on trust does not tell whether its identity qualified.
+static bool gPredictionQualificationUnknown = false;
+
 static bool predictionHasUncomputedAnswers(const PredictionPhase& phase)
 {
     for (unsigned int i = 0; i < phase.count; i++)

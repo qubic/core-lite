@@ -4600,7 +4600,7 @@ static void processTickTransactionAntColonySolution(
 
     // No walk and no network for this solution. A lie shows up as a refund this node makes and the
     // quorum does not, so the disagreement lands in the same tick.
-    bool trustClaimedScore = isTrustingClaimedSolutionScore();
+    const bool trustClaimedScore = isTrustingClaimedSolutionScore();
 
     score_engine::Rating childRating = score_engine::Rating::worst();
     const AntColonyBpp9000T::Ann* childAnn = nullptr;
@@ -4622,23 +4622,6 @@ static void processTickTransactionAntColonySolution(
         // Only the walk yields the shift and the claim carries none; the parent's is the lowest it can be.
         childRating.error = transaction->claimedScore;
         childRating.shift = parentShift;
-
-        // While the identity can still enter the prediction phase, whether this solution qualifies it sets how many
-        // log events follow, and a log id must match a node that walked. A claim that does not settle it is walked.
-        if (anchorShiftLimitKnown && gPredictionPhase.count < MAX_NUMBER_OF_MINERS
-            && gPredictionPhase.find(transaction->sourcePublicKey) < 0)
-        {
-            const unsigned int parentError = (parentRec != nullptr) ? parentRec->score : 0u;
-            const AntClaimInference inference = antQualifiesFromClaim(
-                transaction->claimedScore, anchorShiftLimit, parentRec == nullptr, parentShift, parentError,
-                [&]() { return antRootFirstFrameError(processorNumber, transaction); });
-            childRating.shift = inference.shiftLowerBound;
-            if (inference.verdict == AntClaimVerdict::Undecided)
-            {
-                trustClaimedScore = false;
-                childRating = score_engine::Rating::worst();
-            }
-        }
     }
 
     if (trustClaimedScore)
@@ -6825,7 +6808,7 @@ static void beginEpoch()
     ACQUIRE(gPredictionPhaseLock);
     gPredictionPhase.reset();
     RELEASE(gPredictionPhaseLock);
-    gPredictionAnswersIncomplete = false;
+    gPredictionAnswersIncomplete = gPredictionQualificationUnknown;
     minimumComputorScore = NO_MINER_SCORE;
     minimumCandidateScore = NO_MINER_SCORE;
 
@@ -7528,7 +7511,7 @@ static bool loadAllNodeStates()
     copyMem((void*)competitorPublicKeys, nodeStateBuffer.competitorPublicKeys, sizeof(competitorPublicKeys));
     copyMem((void*)competitorScores, nodeStateBuffer.competitorScores, sizeof(competitorScores));
     copyMem(&gPredictionPhase, &nodeStateBuffer.predictionPhase, sizeof(gPredictionPhase));
-    gPredictionAnswersIncomplete = predictionHasUncomputedAnswers(gPredictionPhase);
+    gPredictionAnswersIncomplete = gPredictionQualificationUnknown || predictionHasUncomputedAnswers(gPredictionPhase);
     copyMem((void*)minerPredictionKeys, nodeStateBuffer.minerPredictionKeys, sizeof(minerPredictionKeys));
     copyMem((void*)competitorPredictionKeys, nodeStateBuffer.competitorPredictionKeys, sizeof(competitorPredictionKeys));
     copyMem((void*)competitorTicks, nodeStateBuffer.competitorTicks, sizeof(competitorTicks));
@@ -12883,7 +12866,7 @@ void processArgs(int argc, const char* argv[]) {
         ("auto-flush-stuck-seconds", "Seconds stuck on same tick before auto-rewipe tickData and re-fetch from peers (0=off)", cxxopts::value<int>()->default_value("0"))
 #if defined(__linux__) && !defined(LITE_WASM_SC)
         ("rollback-mode", "DEPRECATED: accepted but ignored", cxxopts::value<std::string>()->default_value("fork"))
-        ("skip-verify-solutions", "AUX takes claimed solution scores on trust; a tick the quorum disagrees with is rolled back", cxxopts::value<bool>())
+        ("skip-verify-solutions", "AUX takes claimed solution scores on trust and keeps no event logs; a tick the quorum disagrees with is rolled back", cxxopts::value<bool>())
 #endif
         ("max-inbound-per-ip", "Max inbound connections per IP (0=unlimited)", cxxopts::value<int>()->default_value("0"))
         ("max-inbound", "Max inbound connection slots (0=none, -1=all)", cxxopts::value<int>()->default_value("-1"))
@@ -12969,7 +12952,9 @@ void processArgs(int argc, const char* argv[]) {
     if (result.count("skip-verify-solutions"))
     {
         forceVerifySolutions = false;
-        logColorToScreen("INFO", "Skip verify solutions enabled: AUX trusts claimed solution scores");
+        qLogger::isDisabled = true;
+        gPredictionQualificationUnknown = true;
+        logColorToScreen("INFO", "Skip verify solutions enabled: AUX trusts claimed solution scores, event logging off");
     }
     if (result.count("verify-fork-rollback"))
     {

@@ -470,6 +470,8 @@ public:
     inline static unsigned int currentTxId;
     inline static unsigned int currentTick;
     inline static bool isPausing;
+    // Lite: set once at start. Nothing is recorded, saved or loaded for the whole run.
+    inline static bool isDisabled;
 
     static unsigned long long getLogId(const char* ptr)
     {
@@ -515,7 +517,7 @@ public:
     static void logMessage(unsigned int messageSize, unsigned char messageType, const void* message)
     {
 #if ENABLED_LOGGING
-        if (isPausing) return;
+        if (isPausing || isDisabled) return;
         // Drop events with no valid tx context (keeps logId dense + digest network-compatible).
         if (!tx.addLogId()) return;
         char buffer[LOG_HEADER_SIZE];
@@ -837,6 +839,7 @@ public:
     static void updateTick(unsigned int _tick)
     {
 #if ENABLED_LOGGING
+        if (isDisabled) return;
 #ifdef LOGGING_PROBE
         {
             CHAR16 dbg[256];
@@ -875,6 +878,7 @@ public:
     bool saveCurrentLoggingStates(CHAR16* dir)
     {
 #if ENABLED_LOGGING
+        if (isDisabled) return true;
         constexpr auto bufferSize = LOG_BUFFER_PAGE_SIZE + PMAP_LOG_PAGE_SIZE * sizeof(BlobInfo) + IMAP_LOG_PAGE_SIZE * sizeof(TickBlobInfo)
             + sizeof(digests) + 600;
         static_assert(defaultCommonBuffersSize >= bufferSize, "commonBuffer size is too small");
@@ -934,6 +938,7 @@ public:
     {
         savedDigestsSz = 0;
 #if ENABLED_LOGGING
+        if (isDisabled) return true;
         CHAR16 fileName[] = L"logEventState.db";
         const long long fileSz = getFileSize(fileName, dir);
         if (fileSz <= 0 || (unsigned long long)fileSz > logStateBufferSize)
@@ -962,6 +967,7 @@ public:
     bool loadLastLoggingStates(CHAR16* dir)
     {
 #if ENABLED_LOGGING
+        if (isDisabled) return true;
         static_assert(defaultCommonBuffersSize >= logStateBufferSize, "commonBuffer size is too small");
         unsigned long long savedDigestsSz = 0;
         if (!checkLastLoggingStates(dir, savedDigestsSz))
