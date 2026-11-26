@@ -245,6 +245,7 @@ Delete the **system** file at your current working folder, it may make your node
 | **Lite Node Operator ID (Seed)** | `--operator-seed` | `--operator-seed aaa...aaa` | Used to identify lite node operators in the network (utilized by the **Network Guardian** project). |
 | **Logging Reader Passcode** | `--reader-passcode` | `--reader-passcode 1-2-3-4` | The passcode required to access or read node logs. |
 | **HTTP Admin Passcode** | `--http-passcode` | `--http-passcode 1-2-3-4` | The passcode required for admin HTTP routes (shutdown, snapshot, file download). Admin routes are disabled when unset. |
+| **Skip Verify Solutions** | `--skip-verify-solutions` | `--skip-verify-solutions` | AUX node takes claimed solution scores on trust instead of computing them, and rolls a tick back when the quorum disagrees (Linux only). Such a node keeps no event logs and serves no prediction data. Without it every solution is verified. |
 
 ## Supporting Platform
 

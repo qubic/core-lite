@@ -1,0 +1,9 @@
+{
+  "name": "ant-solution-check",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@qubic.org/crypto": "1.0.0",
+    "@qubic.org/types": "1.0.0"
+  }
+}

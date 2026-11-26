@@ -303,3 +303,58 @@ TEST(TestAntColonyMaintenance, RaisedShiftIsRankedOnce)
     EXPECT_EQ(AntColonyMaintenance::drainRaisedShifts(*colony, rank), 0u);
     EXPECT_EQ(calls, 1u);
 }
+
+// The mark says how the score was taken at commit, so neither the network a later walk supplies nor a
+// snapshot round trip may clear it.
+TEST(TestAntColonyStore, TrustMarkOutlivesTheLateNetworkAndTheSnapshot)
+{
+    AntColonyBpp9000T* colony = freshColony();
+    ASSERT_NE(colony, nullptr) << colonyInitFailure();
+
+    const m256i me = makeKey(40);
+    const long long verified = commitRootChild(colony, me, 3800, 0, 900);
+    const long long trusted = commitRootChildWithoutAnn(colony, me, 3810, 1, 901);
+    ASSERT_NE(verified, ANT_INVALID_INDEX);
+    ASSERT_NE(trusted, ANT_INVALID_INDEX);
+
+    EXPECT_EQ(colony->recordAt(verified)->padding, 0u);
+    EXPECT_EQ(colony->recordAt(trusted)->padding, ANT_RECORD_TRUSTED_AT_COMMIT);
+
+    ASSERT_EQ(colony->tryClaimAnn((unsigned int)trusted), AntColonyBpp9000T::AnnClaimOwned);
+    AntColonyBpp9000T::Ann rebuilt;
+    setMem(&rebuilt, sizeof(rebuilt), 0);
+    rebuilt.lut[0] = 1;
+    unsigned int annHash;
+    KangarooTwelve(&rebuilt, sizeof(rebuilt), &annHash, sizeof(annHash));
+    colony->publishAnn((unsigned int)trusted, rebuilt, annHash, 0);
+
+    EXPECT_TRUE(colony->isAnnMaterialised((unsigned int)trusted));
+    EXPECT_EQ(colony->recordAt(trusted)->padding, ANT_RECORD_TRUSTED_AT_COMMIT);
+
+    ASSERT_TRUE(saveWipeLoad(colony));
+    EXPECT_EQ(colony->recordAt(verified)->padding, 0u);
+    EXPECT_EQ(colony->recordAt(trusted)->padding, ANT_RECORD_TRUSTED_AT_COMMIT);
+}
+
+// A tick's records are one run. A tick that committed nothing, or lies outside the epoch, has none.
+TEST(TestAntColonyStore, TickRunCoversExactlyThatTicksRecords)
+{
+    AntColonyBpp9000T* colony = freshColony();
+    ASSERT_NE(colony, nullptr) << colonyInitFailure();
+
+    const m256i me = makeKey(41);
+    ASSERT_NE(commitRootChild(colony, me, 3800, 0, 910, TEST_PUBLISH_TICK), ANT_INVALID_INDEX);
+    ASSERT_NE(commitRootChild(colony, me, 3810, 4, 911, TEST_PUBLISH_TICK + 1), ANT_INVALID_INDEX);
+    ASSERT_NE(commitRootChild(colony, me, 3820, 7, 912, TEST_PUBLISH_TICK + 1), ANT_INVALID_INDEX);
+
+    unsigned int startIdx = 99;
+    unsigned int count = 99;
+    ASSERT_TRUE(colony->tickRun(TEST_PUBLISH_TICK + 1, startIdx, count));
+    EXPECT_EQ(startIdx, 1u);
+    ASSERT_EQ(count, 2u);
+    EXPECT_EQ(colony->recordAt(startIdx)->selfRef.solutionIndexInTick, 4u);
+    EXPECT_EQ(colony->recordAt(startIdx + 1)->selfRef.solutionIndexInTick, 7u);
+
+    EXPECT_FALSE(colony->tickRun(TEST_PUBLISH_TICK + 2, startIdx, count));
+    EXPECT_FALSE(colony->tickRun(TEST_INITIAL_TICK - 1, startIdx, count));
+}

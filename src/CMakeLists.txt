@@ -140,6 +140,11 @@ set_target_properties(Qubic PROPERTIES SKIP_BUILD_RPATH TRUE)
 # the bootstrap file without rewriting the source tree during normal builds.
 set(BTC_PRICE_BOOTSTRAP_FILE ${CMAKE_SOURCE_DIR}/data/btc_price_bootstrap.bin)
 set(BTC_PRICE_BOOTSTRAP_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/extensions/btc_price_bootstrap.generated.h)
+# The epoch's switch series, replaced once per epoch. Regenerate its header with:
+#   cmake -DINPUT_FILE=data/btc_price_series.bin -DOUTPUT_FILE=src/extensions/btc_price_series.generated.h
+#         -DSYMBOL=BTC_PRICE_SERIES -P cmake/EmbedBinary.cmake
+set(BTC_PRICE_SERIES_FILE ${CMAKE_SOURCE_DIR}/data/btc_price_series.bin)
+set(BTC_PRICE_SERIES_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/extensions/btc_price_series.generated.h)
 add_custom_target(
     btc_price_bootstrap_check
     COMMAND ${CMAKE_COMMAND}
@@ -148,11 +153,19 @@ add_custom_target(
             -DEXPECTED_FILE=${BTC_PRICE_BOOTSTRAP_HEADER}
             -DSYMBOL=BTC_PRICE_BOOTSTRAP
             -P ${CMAKE_SOURCE_DIR}/cmake/EmbedBinary.cmake
+    COMMAND ${CMAKE_COMMAND}
+            -DINPUT_FILE=${BTC_PRICE_SERIES_FILE}
+            -DOUTPUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/btc_price_series.generated.h
+            -DEXPECTED_FILE=${BTC_PRICE_SERIES_HEADER}
+            -DSYMBOL=BTC_PRICE_SERIES
+            -P ${CMAKE_SOURCE_DIR}/cmake/EmbedBinary.cmake
     DEPENDS
             ${BTC_PRICE_BOOTSTRAP_FILE}
             ${BTC_PRICE_BOOTSTRAP_HEADER}
+            ${BTC_PRICE_SERIES_FILE}
+            ${BTC_PRICE_SERIES_HEADER}
             ${CMAKE_SOURCE_DIR}/cmake/EmbedBinary.cmake
-    COMMENT "Checking embedded BTC price bootstrap"
+    COMMENT "Checking embedded BTC price files"
     VERBATIM
 )
 add_dependencies(Qubic btc_price_bootstrap_check)

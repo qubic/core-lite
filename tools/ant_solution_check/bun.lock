@@ -1,0 +1,20 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "ant-solution-check",
+      "dependencies": {
+        "@qubic.org/crypto": "1.0.0",
+        "@qubic.org/types": "1.0.0",
+      },
+    },
+  },
+  "packages": {
+    "@noble/hashes": ["@noble/hashes@2.4.0", "", {}, "sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA=="],
+
+    "@qubic.org/crypto": ["@qubic.org/crypto@1.0.0", "", { "dependencies": { "@noble/hashes": "^2.2.0", "@qubic.org/types": "^1.0.0" } }, "sha512-u4NEQfjthPqsH3R9l9kxRc30piAE009qaM344qPUFoka2IqIMPdcWJL6kpYdj2LhAFMIO3dFT7Udc4pmUueG6g=="],
+
+    "@qubic.org/types": ["@qubic.org/types@1.0.0", "", {}, "sha512-WS5soiLiizga3x7i0ccBN+CQnCbDhgFXAlEEiB7Vt6r1rEEGL4n5R/PJRulJSIj5l3DDQC8Fpeln73VeZqSoCQ=="],
+  }
+}

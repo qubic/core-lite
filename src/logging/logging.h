@@ -68,6 +68,9 @@ struct Peer;
 #define CUSTOM_MESSAGE_OP_START_EPOCH 4850183582582395987ULL // STA_EPOC
 #define CUSTOM_MESSAGE_OP_END_EPOCH 4850183582582591045ULL //END_EPOC
 #define CUSTOM_MESSAGE_ANT_SOLUTION 6146374810954124865ULL // ANT_SOLU
+#define CUSTOM_MESSAGE_PREDICTION_SWITCH 5284784356374958672ULL // PRED_SWI
+#define CUSTOM_MESSAGE_PREDICTION_ANSWER 6002807230754542160ULL // PRED_ANS
+#define CUSTOM_MESSAGE_PREDICTION_RESULT 6000292647661818448ULL // PRED_RES
 /*
 * STRUCTS FOR LOGGING
 */
@@ -206,6 +209,42 @@ struct AntSolutionLogMessage
     unsigned int score;
     // ValidityResult of the commit
     unsigned int result;
+
+    char _terminator; // Only data before "_terminator" are logged
+};
+
+// The epoch switched to the prediction ranking; hours from firstHour on are counted.
+struct PredictionSwitchLogMessage
+{
+    unsigned long long _type; // CUSTOM_MESSAGE_PREDICTION_SWITCH
+    unsigned int computorsQualified;
+    unsigned int firstHour;
+
+    char _terminator; // Only data before "_terminator" are logged
+};
+
+// The answer of one ranked identity for an hour, logged once the hour's deadline has passed.
+struct PredictionAnswerLogMessage
+{
+    unsigned long long _type; // CUSTOM_MESSAGE_PREDICTION_ANSWER
+    m256i publicKey;
+    unsigned int hour;
+    // The solution whose network gave the answer.
+    unsigned int solutionTick;
+    unsigned int solutionIndexInTick;
+    // 0 = down, 1 = up, 2 = none
+    unsigned int answer;
+
+    char _terminator; // Only data before "_terminator" are logged
+};
+
+// The outcome of an hour, logged when its price is stored.
+struct PredictionResultLogMessage
+{
+    unsigned long long _type; // CUSTOM_MESSAGE_PREDICTION_RESULT
+    unsigned int hour;
+    // 0 = down, 1 = up, 2 = no price: the hour is counted for nobody
+    unsigned int target;
 
     char _terminator; // Only data before "_terminator" are logged
 };
@@ -431,6 +470,8 @@ public:
     inline static unsigned int currentTxId;
     inline static unsigned int currentTick;
     inline static bool isPausing;
+    // Lite: set once at start. Nothing is recorded, saved or loaded for the whole run.
+    inline static bool isDisabled;
 
     static unsigned long long getLogId(const char* ptr)
     {
@@ -476,7 +517,7 @@ public:
     static void logMessage(unsigned int messageSize, unsigned char messageType, const void* message)
     {
 #if ENABLED_LOGGING
-        if (isPausing) return;
+        if (isPausing || isDisabled) return;
         // Drop events with no valid tx context (keeps logId dense + digest network-compatible).
         if (!tx.addLogId()) return;
         char buffer[LOG_HEADER_SIZE];
@@ -798,6 +839,7 @@ public:
     static void updateTick(unsigned int _tick)
     {
 #if ENABLED_LOGGING
+        if (isDisabled) return;
 #ifdef LOGGING_PROBE
         {
             CHAR16 dbg[256];
@@ -836,6 +878,7 @@ public:
     bool saveCurrentLoggingStates(CHAR16* dir)
     {
 #if ENABLED_LOGGING
+        if (isDisabled) return true;
         constexpr auto bufferSize = LOG_BUFFER_PAGE_SIZE + PMAP_LOG_PAGE_SIZE * sizeof(BlobInfo) + IMAP_LOG_PAGE_SIZE * sizeof(TickBlobInfo)
             + sizeof(digests) + 600;
         static_assert(defaultCommonBuffersSize >= bufferSize, "commonBuffer size is too small");
@@ -895,6 +938,7 @@ public:
     {
         savedDigestsSz = 0;
 #if ENABLED_LOGGING
+        if (isDisabled) return true;
         CHAR16 fileName[] = L"logEventState.db";
         const long long fileSz = getFileSize(fileName, dir);
         if (fileSz <= 0 || (unsigned long long)fileSz > logStateBufferSize)
@@ -923,6 +967,7 @@ public:
     bool loadLastLoggingStates(CHAR16* dir)
     {
 #if ENABLED_LOGGING
+        if (isDisabled) return true;
         static_assert(defaultCommonBuffersSize >= logStateBufferSize, "commonBuffer size is too small");
         unsigned long long savedDigestsSz = 0;
         if (!checkLastLoggingStates(dir, savedDigestsSz))

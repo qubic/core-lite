@@ -17,10 +17,12 @@
 #include "mining/mining.h"
 #include "mining/trit_pack.h"
 
-// The keyed structures are twice the population they index.
-static constexpr unsigned long long ANT_DEDUP_SIZE = 2ULL * ANT_MAX_NODES_PER_EPOCH;
+// Both tables are rounded up to the power of two the hash containers require. Dedup load stays at or below 80%.
+static constexpr unsigned long long ANT_DEDUP_SIZE =
+    math_lib::findNextPowerOf2(ANT_MAX_NODES_PER_EPOCH + ANT_MAX_NODES_PER_EPOCH / 4);
 // At most one key per record, and records are capped, so load stays at or below 50% and set() cannot fail.
-static constexpr unsigned long long ANT_CHILD_HEAD_BY_PARENT_SIZE = 2ULL * ANT_MAX_NODES_PER_EPOCH;
+static constexpr unsigned long long ANT_CHILD_HEAD_BY_PARENT_SIZE =
+    math_lib::findNextPowerOf2(2ULL * ANT_MAX_NODES_PER_EPOCH);
 static_assert(ANT_CHILD_HEAD_BY_PARENT_SIZE >= 2ULL * ANT_MAX_NODES_PER_EPOCH,
     "child-head-by-parent map must stay at or below 50% load so its set() cannot fail");
 // One entry per identity holding a tree. Unlike the map above, nothing caps how many identities
@@ -48,6 +50,8 @@ static constexpr unsigned int WORST_SCORE = 0xFFFFFFFFU;
 // so annOfNonRoot()'s bounds check already reads them as "no network". MATERIALISING is a walk in progress.
 static constexpr unsigned int ANT_ANN_UNMATERIALISED = 0xFFFFFFFFU;
 static constexpr unsigned int ANT_ANN_MATERIALISING = 0xFFFFFFFEU;
+// AntSolutionRecord::padding of a record whose score was taken on trust. Stays after its network is filled in.
+static constexpr unsigned int ANT_RECORD_TRUSTED_AT_COMMIT = 1;
 static constexpr long long ANT_INVALID_INDEX = -1;
 
 // Anchor digests for recent ticks, indexed by tick & (size - 1). Smallest power of two holding
@@ -533,6 +537,20 @@ public:
     }
 
     long long findIndexBySolutionRef(const SolutionRef& ref) const;
+
+    // The records committed in one tick, as a run of indices. False when the tick holds none. Any thread.
+    bool tickRun(unsigned int tick, unsigned int& startIdx, unsigned int& count) const
+    {
+        unsigned int tickSlot = 0;
+        if (!slotOf(tick, tickSlot))
+        {
+            return false;
+        }
+        const AntTickSlot& slot = _tickIndex[tickSlot];
+        count = slot.count;
+        startIdx = slot.startIdx;
+        return count != 0;
+    }
 
     // Constraint specific functions
 
@@ -1285,7 +1303,7 @@ inline ValidityResult AntColony<ScoreT>::commit(const AntCommitInput& in, const 
         return ValidityResult::RejectTickOutOfRange;
     }
     // never commit a solution without recording its replay key. Cannot fire under the
-    // cap (population <= ANT_MAX_NODES_PER_EPOCH = 50% of ANT_DEDUP_SIZE), kept as a defensive check
+    // cap (population <= ANT_MAX_NODES_PER_EPOCH, at most 80% of ANT_DEDUP_SIZE), kept as a defensive check
     if (_dedup->add(dedupKey) == QPI::NULL_INDEX)
     {
         recordReject(ValidityResult::RejectDedupFull);
@@ -1339,7 +1357,7 @@ inline ValidityResult AntColony<ScoreT>::commit(const AntCommitInput& in, const 
     newRec.childAnnHash = childAnnHash;
     newRec.annStateSlot = (childAnn != nullptr) ? newIdx : ANT_ANN_UNMATERIALISED;
     newRec.nextSiblingIdx = prevHead;
-    newRec.padding = 0;
+    newRec.padding = trustedScore ? ANT_RECORD_TRUSTED_AT_COMMIT : 0;
 
     AntTickSlot& tslot = _tickIndex[selfSlot];
     if (tslot.count == 0)

@@ -747,6 +747,13 @@ RPC_ROUTE("POST", "/query/v1/getEventLogs")
     result["message"] = "event logs disabled in this build";
     return jsonResp(result, 503);
 #else
+    if (qLogger::isDisabled)
+    {
+        Json::Value result;
+        result["code"] = -1;
+        result["message"] = "event logs disabled on this node";
+        return jsonResp(result, 503);
+    }
     try
     {
         Json::Value result;
