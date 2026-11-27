@@ -189,6 +189,9 @@ class OrchestratorConfig(BaseSettings):
     data_dir: str = "/qubic"
     binary_path: str = "/qubic/Qubic"
     binary_staging_dir: str = "/opt/qubic-bin"
+    # Which build to install from the staging dir: "auto" (AVX-512 when the CPU
+    # has every extension it uses, AVX2 otherwise), "avx512" or "avx2".
+    binary_variant: str = "auto"
     log_level: str = "INFO"
     log_format: str = "json"
 

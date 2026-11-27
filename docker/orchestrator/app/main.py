@@ -14,6 +14,7 @@ import aiohttp
 from app.alerting import AlertManager
 from app.cleanup import Cleanup
 from app.config import OrchestratorConfig, load_config
+from app.cpu_features import BINARY_NAMES, read_cpu_flags, select_variant
 from app.downloaders import create_downloader
 from app.epoch_service import EpochService
 from app.local_snapshot_saver import LocalSnapshotSaver
@@ -197,8 +198,12 @@ class Orchestrator:
         volume.  This method ensures the volume always has the binary that
         shipped with the current image.
 
-        The copy is skipped when the volume already has a binary whose
-        version is equal to or newer than the staged one.
+        The image stages two builds (QubicAVX512, QubicAVX2); the one the CPU
+        can run is installed as Qubic (see app/cpu_features.py), and its name
+        is kept in binary-variant.txt on the volume.
+
+        The copy is skipped when the volume already has a binary of the same
+        variant whose version is equal to or newer than the staged one.
         """
         staging_dir = Path(self._config.binary_staging_dir)
         if not staging_dir.is_dir():
@@ -208,25 +213,43 @@ class Orchestrator:
             )
             return
 
+        variant, reason = select_variant(
+            read_cpu_flags(), self._config.binary_variant
+        )
+        staged_bin = staging_dir / BINARY_NAMES[variant]
+        if not staged_bin.exists():
+            # Image staged a single binary (built before the two variants).
+            staged_bin = staging_dir / "Qubic"
+            variant = "single"
+        if not staged_bin.exists():
+            logger.warning(f"No Qubic binary in {staging_dir}, skipping binary install")
+            return
+        logger.info(f"Qubic binary variant: {variant} ({reason})")
+
         staged_ver = EpochService.read_local_version(
             str(staging_dir / "version.txt")
         )
         local_ver = EpochService.read_local_version(
             str(self._data_dir / "version.txt")
         )
+        variant_file = self._data_dir / "binary-variant.txt"
+        try:
+            local_variant = variant_file.read_text().strip()
+        except OSError:
+            local_variant = ""
 
         # Compare version and file modification time — a recompiled binary
         # with the same version but a newer mtime should still be installed.
-        staged_bin = staging_dir / "Qubic"
         local_bin = self._data_dir / "Qubic"
         staged_newer = False
-        if staged_bin.exists() and local_bin.exists():
+        if local_bin.exists():
             staged_newer = staged_bin.stat().st_mtime > local_bin.stat().st_mtime
 
-        if staged_ver and local_ver and local_ver >= staged_ver and not staged_newer:
+        if (staged_ver and local_ver and local_ver >= staged_ver
+                and not staged_newer and local_variant == variant):
             logger.info(
                 f"Binary on volume "
-                f"({EpochService.format_version(local_ver)}) is "
+                f"({EpochService.format_version(local_ver)}, {variant}) is "
                 f"up-to-date with staged "
                 f"({EpochService.format_version(staged_ver)}), "
                 "skipping install"
@@ -240,18 +263,19 @@ class Orchestrator:
             EpochService.format_version(local_ver) if local_ver else "none"
         )
         logger.info(
-            f"Updating binary on volume: {local_fmt} -> {staged_fmt}"
+            f"Updating binary on volume: {local_fmt} ({local_variant or '?'}) "
+            f"-> {staged_fmt} ({variant})"
         )
 
-        for name in ("Qubic", "epoch.txt", "version.txt"):
+        shutil.copy2(staged_bin, local_bin)
+        local_bin.chmod(0o755)
+        logger.info(f"Installed {staged_bin.name} as Qubic from image staging dir")
+        for name in ("epoch.txt", "version.txt"):
             src = staging_dir / name
-            if not src.exists():
-                continue
-            dst = self._data_dir / name
-            shutil.copy2(src, dst)
-            if name == "Qubic":
-                dst.chmod(0o755)
-            logger.info(f"Installed {name} from image staging dir")
+            if src.exists():
+                shutil.copy2(src, self._data_dir / name)
+                logger.info(f"Installed {name} from image staging dir")
+        variant_file.write_text(variant)
 
     @staticmethod
     async def _get_public_ip() -> Optional[str]:

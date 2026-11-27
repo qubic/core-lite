@@ -14,7 +14,7 @@ The provided `cloud-init.yml` automatically:
 - Ubuntu 24.04 VM
 - At least 64 GB RAM
 - 50 GB+ SSD
-- x86_64 CPU with AVX2 support
+- x86_64 CPU with AVX2 (AVX-512 is used automatically when available)
 
 ## Usage
 
