@@ -1,6 +1,6 @@
 # Keep host build artifacts out of the build context so the in-container
 # cmake invocation in docker/orchestrator/Dockerfile is the sole source of
-# truth for compile flags (e.g. ENABLE_AVX512=OFF).
+# truth for compile flags (e.g. ENABLE_AVX512).
 build/
 **/build/
 .git/

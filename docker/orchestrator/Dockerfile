@@ -30,12 +30,26 @@ WORKDIR /build/qubic-core-lite
 COPY . .
 
 # Always build from source inside the container so the binary's compile
-# flags (notably ENABLE_AVX512=OFF) are guaranteed to match this Dockerfile.
+# flags (notably ENABLE_AVX512) are guaranteed to match this Dockerfile.
 # Any local build/ tree from the host is discarded — it may have been
-# configured with different flags (e.g. AVX-512 on, the cmake default).
-RUN rm -rf build \
-    && mkdir -p build && cd build \
-    && cmake .. \
+# configured with different flags.
+#
+# Two binaries from the same source: AVX-512 and AVX2. At startup the
+# orchestrator installs the AVX-512 one when the CPU has every extension it
+# was compiled for, the AVX2 one otherwise (app/cpu_features.py).
+RUN rm -rf build build-avx512 \
+    && cmake -S . -B build-avx512 \
+        -D CMAKE_C_COMPILER=clang \
+        -D CMAKE_CXX_COMPILER=clang++ \
+        -D BUILD_TESTS:BOOL=OFF \
+        -D BUILD_BINARY:BOOL=ON \
+        -D CMAKE_BUILD_TYPE=Release \
+        -D ENABLE_AVX512=ON \
+        -D ONLY_LOGGING=ON \
+    && cmake --build build-avx512 --target Qubic -- -j$(nproc)
+
+RUN rm -rf build-avx2 \
+    && cmake -S . -B build-avx2 \
         -D CMAKE_C_COMPILER=clang \
         -D CMAKE_CXX_COMPILER=clang++ \
         -D BUILD_TESTS:BOOL=OFF \
@@ -43,11 +57,12 @@ RUN rm -rf build \
         -D CMAKE_BUILD_TYPE=Release \
         -D ENABLE_AVX512=OFF \
         -D ONLY_LOGGING=ON \
-    && cmake --build . --target Qubic -- -j$(nproc)
+    && cmake --build build-avx2 --target Qubic -- -j$(nproc)
 
 # Collect build outputs into a common location
 RUN mkdir -p /output \
-    && cp build/src/Qubic /output/Qubic \
+    && cp build-avx512/src/Qubic /output/QubicAVX512 \
+    && cp build-avx2/src/Qubic /output/QubicAVX2 \
     && grep -oP '#define EPOCH \K[0-9]+' src/public_settings.h > /output/epoch.txt \
     && printf "%s.%s" \
         "$(grep -oP '#define VERSION_A \K[0-9]+' src/public_settings.h)" \
@@ -92,10 +107,11 @@ RUN pip install --no-cache-dir .
 # Stage binary and metadata in a non-volume location so that container
 # image updates always bring the new binary, even when /qubic is a
 # persistent Docker volume (Docker only populates volumes on first use).
-COPY --from=builder /output/Qubic /opt/qubic-bin/Qubic
+COPY --from=builder /output/QubicAVX512 /opt/qubic-bin/QubicAVX512
+COPY --from=builder /output/QubicAVX2 /opt/qubic-bin/QubicAVX2
 COPY --from=builder /output/epoch.txt /opt/qubic-bin/epoch.txt
 COPY --from=builder /output/version.txt /opt/qubic-bin/version.txt
-RUN chmod +x /opt/qubic-bin/Qubic
+RUN chmod +x /opt/qubic-bin/QubicAVX512 /opt/qubic-bin/QubicAVX2
 
 WORKDIR /qubic
 

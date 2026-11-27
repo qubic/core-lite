@@ -74,6 +74,7 @@ On startup the orchestrator:
 | `QUBIC_FORCE_DOWNLOAD` | `false` | Force snapshot re-download on startup |
 | `QUBIC_THREADS` | *(auto)* | Number of processing threads |
 | `QUBIC_SOLUTION_THREADS` | *(auto)* | Number of mining threads |
+| `QUBIC_BINARY_VARIANT` | `auto` | Node build to run: `auto` (AVX-512 when the CPU supports it, else AVX2), `avx512` or `avx2` |
 
 ### Operator (optional)
 
@@ -218,7 +219,7 @@ The image includes a Docker health check that queries the node's HTTP API every 
 
 ## Requirements
 
-- **CPU**: x86_64 (AVX2 support recommended)
+- **CPU**: x86_64 with AVX2. The image holds an AVX-512 build and an AVX2 build of the node and starts the AVX-512 one when the CPU has AVX-512 F, CD, VL, BW, DQ, VBMI, VBMI2, VPOPCNTDQ and GFNI (e.g. AMD Zen 4 or newer), the AVX2 one otherwise.
 - **RAM**: 64GB minimum for mainnet
 - **Disk**: 50GB+ for state files
 - **Network**: Stable connection with port 21841 accessible for P2P
