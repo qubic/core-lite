@@ -2,6 +2,8 @@
 
 #ifdef NO_UEFI
 
+#include <cstring>
+
 // Defined in test/stdlib_impl.cpp
 
 void setMem(void* buffer, unsigned long long size, unsigned char value);
@@ -11,6 +13,12 @@ void copyMem(void* destination, const void* source, unsigned long long length);
 bool allocatePool(unsigned long long size, void** buffer);
 
 void freePool(void* buffer);
+
+static inline bool isZeroBlock(const void* block, unsigned long long size)
+{
+    const unsigned char* bytes = (const unsigned char*)block;
+    return size == 0 || (bytes[0] == 0 && memcmp(bytes, bytes + 1, size - 1) == 0);
+}
 
 #else
 

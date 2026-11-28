@@ -575,6 +575,75 @@ TEST(TestSwapVirtualMemory, IndexEvictReloadIntegritySmall) {
     }
 }
 
+// A state written straight from the cache into its file must load back, in both modes: that file is
+// what a snapshot load reads.
+TEST(TestSwapVirtualMemory, DumpToFileLoadsBack) {
+    initFilesystem();
+    registerAsynFileIO(NULL);
+    CHAR16 fileName[] = L"tmp_swapvm_dump.bin";
+    // Stays inside the cache, so nothing below depends on page files.
+    const unsigned long long NPAGES = 3;
+    {
+        const unsigned long long CAP = 256;
+        SwapVirtualMemory<E16, wcharToNumber(L"dmpi"), wcharToNumber(L"data"), 256, 4, INDEX_MODE, 0> vm;
+        vm.init();
+        for (unsigned long long p = 0; p < NPAGES; p++) {
+            PinScope _;
+            E16& e = vm.getRef(p * CAP + 5);
+            e.a = p + 1; e.b = (p + 1) * 7;
+        }
+
+        LargeFileWriter writer;
+        ASSERT_TRUE(writer.open(fileName, vm.getVmStateSize(), nullptr));
+        ASSERT_TRUE(vm.dumpVMState([&writer](const unsigned char* piece, unsigned long long size) { return writer.write(piece, size); }));
+        ASSERT_TRUE(writer.close());
+        ASSERT_EQ(getFileSize(fileName), (long long)vm.getVmStateSize());
+
+        for (unsigned long long p = 0; p < NPAGES; p++) {
+            PinScope _;
+            E16& e = vm.getRef(p * CAP + 5);
+            e.a = 0xDEAD; e.b = 0xBEEF;
+        }
+        std::vector<unsigned char> state(vm.getVmStateSize());
+        ASSERT_EQ(loadLargeFile(fileName, state.size(), state.data(), nullptr), (long long)state.size());
+        ASSERT_EQ(vm.loadVMState(state.data()), state.size());
+        for (unsigned long long p = 0; p < NPAGES; p++) {
+            PinScope _;
+            E16& e = vm.getRef(p * CAP + 5);
+            EXPECT_EQ(e.a, p + 1);
+            EXPECT_EQ(e.b, (p + 1) * 7);
+        }
+    }
+    {
+        const unsigned long long CAP = 4096;
+        SwapVirtualMemory<char, wcharToNumber(L"dmpo"), wcharToNumber(L"data"), 4096, 4, OFFSET_MODE, 2> vm;
+        vm.init();
+        for (unsigned long long p = 0; p < NPAGES; p++) {
+            PinScope _;
+            *vm[p * CAP + 9] = (char)(p + 11);
+        }
+
+        LargeFileWriter writer;
+        ASSERT_TRUE(writer.open(fileName, vm.getVmStateSize(), nullptr));
+        ASSERT_TRUE(vm.dumpVMState([&writer](const unsigned char* piece, unsigned long long size) { return writer.write(piece, size); }));
+        ASSERT_TRUE(writer.close());
+        ASSERT_EQ(getFileSize(fileName), (long long)vm.getVmStateSize());
+
+        for (unsigned long long p = 0; p < NPAGES; p++) {
+            PinScope _;
+            *vm[p * CAP + 9] = 99;
+        }
+        std::vector<unsigned char> state(vm.getVmStateSize());
+        ASSERT_EQ(loadLargeFile(fileName, state.size(), state.data(), nullptr), (long long)state.size());
+        ASSERT_EQ(vm.loadVMState(state.data()), state.size());
+        for (unsigned long long p = 0; p < NPAGES; p++) {
+            PinScope _;
+            EXPECT_EQ(*vm[p * CAP + 9], (char)(p + 11));
+        }
+    }
+    std::filesystem::remove("tmp_swapvm_dump.bin");
+}
+
 // Child-promote reinit: resetPinsForChildPromote must clear the inherited locks/pins/LOADING slots
 // without corrupting cache content, and drainInflightIO must report idle afterwards. Every page (cached
 // or evicted) must still read back correctly, and the absence of an orphan LOADING slot is proven by
@@ -821,8 +890,12 @@ TEST(TestSwapVirtualMemory, RestoredCachedPageSurvivesEviction)
         vm.getRef(pageCapacity).a = 0x12345678;
     }
 
-    std::vector<unsigned char> snapshot(vm.getVmStateSize());
-    ASSERT_EQ(vm.dumpVMState(snapshot.data()), snapshot.size());
+    std::vector<unsigned char> snapshot;
+    ASSERT_TRUE(vm.dumpVMState([&snapshot](const unsigned char* piece, unsigned long long size) {
+        snapshot.insert(snapshot.end(), piece, piece + size);
+        return true;
+    }));
+    ASSERT_EQ(snapshot.size(), vm.getVmStateSize());
 
     vm.reset();
     ASSERT_EQ(vm.loadVMState(snapshot.data()), snapshot.size());

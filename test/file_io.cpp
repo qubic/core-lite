@@ -45,6 +45,15 @@ inline static unsigned long long random64(const unsigned long long range)
     return (value % range);
 }
 
+#ifdef __linux__
+#include <sys/stat.h>
+static unsigned long long allocatedBytes(const char* path)
+{
+    struct stat fileStat;
+    return stat(path, &fileStat) == 0 ? (unsigned long long)fileStat.st_blocks * 512 : ~0ULL;
+}
+#endif
+
 class FileSystemWrapper
 {
 public:
@@ -132,6 +141,10 @@ private:
             "tmp_file_no_uefi_file_size_dir",
             "tmp_file_no_uefi_missing_size_dir",
             "tmp_file_no_uefi_missing_size.bin",
+            "tmp_file_no_uefi_sparse.bin",
+            "tmp_file_no_uefi_zero.bin",
+            "tmp_file_no_uefi_writer_whole",
+            "tmp_file_no_uefi_writer_pieces",
         };
 
         for (const char* path : paths)
@@ -409,6 +422,124 @@ TEST_F(TestNoUefiFileIO, ShortReadReturnsFailureAndClosesFile)
     ASSERT_EQ(save(fileName, sizeof(saved), &saved, nullptr), sizeof(saved));
     EXPECT_EQ(load(fileName, sizeof(loaded), loaded, nullptr), -1);
     EXPECT_TRUE(removeFile(nullptr, fileName));
+}
+
+// Zero runs at the start, in the middle and at the end read back as written, and the length is kept.
+TEST_F(TestNoUefiFileIO, SaveKeepsZeroRunsAndLength)
+{
+    CHAR16 fileName[] = L"tmp_file_no_uefi_sparse.bin";
+    const unsigned long long size = 3ULL * 1024 * 1024 + 123;
+    std::vector<unsigned char> expected(size, 0);
+    expected[20000] = 1;
+    for (unsigned long long i = 1024 * 1024 + 100; i < 1024 * 1024 + 9000; i++)
+    {
+        expected[i] = (unsigned char)(i % 251 + 1);
+    }
+
+    ASSERT_EQ(save(fileName, size, expected.data(), nullptr), (long long)size);
+    EXPECT_EQ(getFileSize(fileName, nullptr), (long long)size);
+    std::vector<unsigned char> actual(size, 0xFF);
+    ASSERT_EQ(load(fileName, size, actual.data(), nullptr), (long long)size);
+    EXPECT_EQ(memcmp(actual.data(), expected.data(), size), 0);
+#ifdef __linux__
+    EXPECT_LT(allocatedBytes("tmp_file_no_uefi_sparse.bin"), size / 2);
+#endif
+}
+
+TEST_F(TestNoUefiFileIO, SaveAllZeroBufferKeepsLength)
+{
+    CHAR16 fileName[] = L"tmp_file_no_uefi_zero.bin";
+    const unsigned long long size = 1024 * 1024 + 7;
+    std::vector<unsigned char> zeros(size, 0);
+
+    ASSERT_EQ(save(fileName, size, zeros.data(), nullptr), (long long)size);
+    EXPECT_EQ(getFileSize(fileName, nullptr), (long long)size);
+    std::vector<unsigned char> actual(size, 0xFF);
+    ASSERT_EQ(load(fileName, size, actual.data(), nullptr), (long long)size);
+    EXPECT_EQ(memcmp(actual.data(), zeros.data(), size), 0);
+}
+
+// Pieces of any size must end up in the same files, byte for byte, as one saveLargeFile() call.
+TEST_F(TestNoUefiFileIO, LargeFileWriterMatchesSaveLargeFile)
+{
+    CHAR16 wholeDirectory[] = L"tmp_file_no_uefi_writer_whole";
+    CHAR16 piecesDirectory[] = L"tmp_file_no_uefi_writer_pieces";
+    CHAR16 chunkedName[] = L"chunked.bin";
+    CHAR16 singleName[] = L"single.bin";
+    ASSERT_TRUE(createDir(wholeDirectory));
+    ASSERT_TRUE(createDir(piecesDirectory));
+
+    // Two chunk files, with data at the start, across the chunk boundary and at the very end.
+    const unsigned long long chunkedSize = FILE_CHUNK_SIZE + 5ULL * 1024 * 1024 + 77;
+    std::vector<unsigned char> data(chunkedSize, 0);
+    for (unsigned long long i = 0; i < 5000; i++)
+    {
+        data[i] = (unsigned char)(i % 253 + 1);
+        data[FILE_CHUNK_SIZE - 2500 + i] = (unsigned char)(i % 241 + 1);
+        data[chunkedSize - 5000 + i] = (unsigned char)(i % 239 + 1);
+    }
+    const unsigned long long singleSize = 3ULL * 1024 * 1024 + 5;
+
+    const auto writeInPieces = [&](CHAR16* fileName, unsigned long long totalSize)
+    {
+        LargeFileWriter writer;
+        if (!writer.open(fileName, totalSize, piecesDirectory))
+        {
+            return false;
+        }
+        const unsigned long long pieceSize = 7777777;
+        for (unsigned long long offset = 0; offset < totalSize; offset += pieceSize)
+        {
+            const unsigned long long size = totalSize - offset < pieceSize ? totalSize - offset : pieceSize;
+            if (!writer.write(data.data() + offset, size))
+            {
+                return false;
+            }
+        }
+        return writer.close();
+    };
+
+    ASSERT_EQ(saveLargeFile(chunkedName, chunkedSize, data.data(), wholeDirectory, false), (long long)chunkedSize);
+    ASSERT_EQ(saveLargeFile(singleName, singleSize, data.data(), wholeDirectory, false), (long long)singleSize);
+    ASSERT_TRUE(writeInPieces(chunkedName, chunkedSize));
+    ASSERT_TRUE(writeInPieces(singleName, singleSize));
+
+    const auto readFile = [](const std::filesystem::path& path)
+    {
+        std::ifstream stream(path, std::ios::binary);
+        return std::vector<char>(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+    };
+    unsigned int fileCount = 0;
+    for (const auto& entry : std::filesystem::directory_iterator("tmp_file_no_uefi_writer_whole"))
+    {
+        const std::filesystem::path twin = std::filesystem::path("tmp_file_no_uefi_writer_pieces") / entry.path().filename();
+        ASSERT_TRUE(std::filesystem::exists(twin)) << twin;
+        EXPECT_TRUE(readFile(entry.path()) == readFile(twin)) << twin;
+        fileCount++;
+    }
+    EXPECT_EQ(fileCount, 3u);
+    unsigned int piecesFileCount = 0;
+    for (const auto& entry : std::filesystem::directory_iterator("tmp_file_no_uefi_writer_pieces"))
+    {
+        (void)entry;
+        piecesFileCount++;
+    }
+    EXPECT_EQ(piecesFileCount, 3u);
+
+    std::vector<unsigned char> loaded(chunkedSize, 0xFF);
+    ASSERT_EQ(loadLargeFile(chunkedName, chunkedSize, loaded.data(), piecesDirectory), (long long)chunkedSize);
+    EXPECT_EQ(memcmp(loaded.data(), data.data(), chunkedSize), 0);
+
+    // A writer that got fewer or more bytes than announced must not report success.
+    LargeFileWriter shortWriter;
+    ASSERT_TRUE(shortWriter.open(singleName, singleSize, piecesDirectory));
+    ASSERT_TRUE(shortWriter.write(data.data(), singleSize - 1));
+    EXPECT_FALSE(shortWriter.close());
+    LargeFileWriter longWriter;
+    ASSERT_TRUE(longWriter.open(singleName, singleSize, piecesDirectory));
+    ASSERT_TRUE(longWriter.write(data.data(), singleSize));
+    EXPECT_FALSE(longWriter.write(data.data(), 1));
+    EXPECT_FALSE(longWriter.close());
 }
 
 #ifdef __linux__

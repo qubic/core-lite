@@ -7460,6 +7460,7 @@ static bool loadAllNodeStates()
         logToConsole(L"Failed to load universe");
         return false;
     }
+    releaseZeroPages(assets, ASSETS_CAPACITY * sizeof(AssetRecord));
     if (!loadSnapshotUniverseIndex(L"snapshotUniverseIndex", directory))
         return false;
 
@@ -7633,6 +7634,8 @@ static bool loadAllNodeStates()
         logToConsole(L"Failed to load ant solution flag");
         return false;
     }
+    releaseZeroPages((void*)minerSolutionFlags, NUMBER_OF_MINER_SOLUTION_FLAGS / 8);
+    releaseZeroPages((void*)gAntSolutionFlags, NUMBER_OF_ANT_SOLUTION_FLAGS / 8);
 
     // initialRandomSeedFromPersistingState, not score->currentRandomSeed, the scorer is not reseeded
     // until initialize() finishes, so this is the only restored copy available here.
@@ -9775,6 +9778,14 @@ static bool loadContractStateFiles(CHAR16* directory, bool forceLoadFromFile)
         }
     }
 
+#if !defined(LITE_WASM_SC)
+    // A state file is mostly zeros, and reading it in made every page of the state resident.
+    for (unsigned int contractIndex = 0; contractIndex < contractCount; contractIndex++)
+    {
+        releaseZeroPages(contractStates[contractIndex], contractDescriptions[contractIndex].stateSize);
+    }
+#endif
+
     logToConsole(L"All contract files successfully loaded or initialized.");
 
     return true;
@@ -9987,6 +9998,8 @@ static bool initialize()
 
         if (!initAssets())
             return false;
+        // The universe table is mostly empty: with huge pages one record would hold 2 MiB.
+        qVirtualAdviseNoHugePages(assets, ASSETS_CAPACITY * sizeof(AssetRecord));
 
         initContractExec();
         executionFeeReportCollector.init();
@@ -9999,7 +10012,7 @@ static bool initialize()
             // cached contracts need page-aligned state for per-chunk mprotect; off-path keeps the plain alloc
             const bool contractStateAllocOk = K12StateDigestCache::wantsPageAlignedAlloc(size)
                 ? K12StateDigestCache::allocStatePool(size, (void**)&contractStates[contractIndex])
-                : allocPoolWithErrorLog(L"contractStates", size, (void**)&contractStates[contractIndex], __LINE__);
+                : allocSparsePoolWithErrorLog(L"contractStates", size, (void**)&contractStates[contractIndex], __LINE__);
 #endif
             if (!contractStateAllocOk)
             {
@@ -10236,6 +10249,7 @@ static bool initialize()
             logToConsole(L"Loading universe file ...");
             if (!loadUniverse() && (!canObmitLoadNodeState))
                 return false;
+            releaseZeroPages(assets, ASSETS_CAPACITY * sizeof(AssetRecord));
             m256i universeDigest;
             {
                 setText(message, L"Universe digest = ");

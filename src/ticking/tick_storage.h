@@ -171,29 +171,25 @@ private:
         }
         return true;
     }
+#ifdef USE_SWAP
+    // Writes a swap cache's state to its snapshot file straight from the cache, without a copy of it.
+    template <typename SwapVM>
+    static bool saveSwapVmState(SwapVM& swapVM, CHAR16* fileName, CHAR16* directory)
+    {
+        LargeFileWriter writer;
+        if (!writer.open(fileName, swapVM.getVmStateSize(), directory))
+        {
+            return false;
+        }
+        const bool dumped = swapVM.dumpVMState([&writer](const unsigned char* piece, unsigned long long size) { return writer.write(piece, size); });
+        const bool closed = writer.close();
+        return dumped && closed;
+    }
+#endif
     bool saveTickData(unsigned long long nTick, CHAR16* directory = NULL)
     {
 #ifdef USE_SWAP
-        void *buffer = nullptr;
-        if (!allocPoolWithErrorLog(L"tickDataBuffer", tickDataSwapVM.getVmStateSize(), &buffer, __LINE__))
-        {
-            return false;
-        }
-        unsigned long long sz = tickDataSwapVM.dumpVMState((unsigned char*)buffer);
-        if (sz != tickDataSwapVM.getVmStateSize())
-        {
-            logToConsole(L"Something went wrong when dumping tickData VM state");
-            freePool(buffer);
-            return false;
-        }
-        auto writtenSize = saveLargeFile(SNAPSHOT_TICK_DATA_FILE_NAME, tickDataSwapVM.getVmStateSize(), (unsigned char*)buffer, directory);
-        if (writtenSize != tickDataSwapVM.getVmStateSize())
-        {
-            freePool(buffer);
-            return false;
-        }
-        freePool(buffer);
-        return true;
+        return saveSwapVmState(tickDataSwapVM, SNAPSHOT_TICK_DATA_FILE_NAME, directory);
 #else
         long long totalWriteSize = nTick * sizeof(TickData);
         auto sz = saveLargeFile(SNAPSHOT_TICK_DATA_FILE_NAME, totalWriteSize, (unsigned char*)tickDataPtr, directory);
@@ -207,26 +203,7 @@ private:
     bool saveTicks(unsigned long long nTick, CHAR16* directory = NULL)
     {
 #ifdef USE_SWAP
-        void *buffer = nullptr;
-        if (!allocPoolWithErrorLog(L"ticksBuffer", ticksSwapVM.getVmStateSize(), &buffer, __LINE__))
-        {
-            return false;
-        }
-        unsigned long long sz = ticksSwapVM.dumpVMState((unsigned char*)buffer);
-        if (sz != ticksSwapVM.getVmStateSize())
-        {
-            logToConsole(L"Something went wrong when dumping ticks VM state");
-            freePool(buffer);
-            return false;
-        }
-        auto writtenSize = saveLargeFile(SNAPSHOT_TICKS_FILE_NAME, ticksSwapVM.getVmStateSize(), (unsigned char*)buffer, directory);
-        if (writtenSize != ticksSwapVM.getVmStateSize())
-        {
-            freePool(buffer);
-            return false;
-        }
-        freePool(buffer);
-        return true;
+        return saveSwapVmState(ticksSwapVM, SNAPSHOT_TICKS_FILE_NAME, directory);
 #else
         long long totalWriteSize = nTick * sizeof(Tick) * NUMBER_OF_COMPUTORS;
         auto sz = saveLargeFile(SNAPSHOT_TICKS_FILE_NAME, totalWriteSize, (unsigned char*)ticksPtr, directory);
@@ -240,26 +217,7 @@ private:
     bool saveTickTransactionOffsets(unsigned long long nTick, CHAR16* directory = NULL)
     {
 #ifdef USE_SWAP
-        void *buffer = nullptr;
-        if (!allocPoolWithErrorLog(L"saveTickTransactionOffsetsBuffer", tickTransactionOffsetsSwapVM.getVmStateSize(), &buffer, __LINE__))
-        {
-            return false;
-        }
-        unsigned long long sz = tickTransactionOffsetsSwapVM.dumpVMState((unsigned char*)buffer);
-        if (sz != tickTransactionOffsetsSwapVM.getVmStateSize())
-        {
-            logToConsole(L"Something went wrong when dumping tickTransactionOffsetsSwapVM state");
-            freePool(buffer);
-            return false;
-        }
-        auto writtenSize = saveLargeFile(SNAPSHOT_TICK_TRANSACTION_OFFSET_FILE_NAME, tickTransactionOffsetsSwapVM.getVmStateSize(), (unsigned char*)buffer, directory);
-        if (writtenSize != tickTransactionOffsetsSwapVM.getVmStateSize())
-        {
-            freePool(buffer);
-            return false;
-        }
-        freePool(buffer);
-        return true;
+        return saveSwapVmState(tickTransactionOffsetsSwapVM, SNAPSHOT_TICK_TRANSACTION_OFFSET_FILE_NAME, directory);
 #else
         long long totalWriteSize = nTick * sizeof(tickTransactionOffsetsPtr[0]) * NUMBER_OF_TRANSACTIONS_PER_TICK;
         auto sz = saveLargeFile(SNAPSHOT_TICK_TRANSACTION_OFFSET_FILE_NAME, totalWriteSize, (unsigned char*)tickTransactionOffsetsPtr, directory);
@@ -301,26 +259,12 @@ private:
             outNextTickTransactionOffset = maxOffset;
         }
 #ifdef USE_SWAP
-        void *buffer = nullptr;
-        if (!allocPoolWithErrorLog(L"transactionsBuffer", tickTransactionsSwapVM.getVmStateSize(), &buffer, __LINE__))
-        {
-            return false;
-        }
-        unsigned long long sz = tickTransactionsSwapVM.dumpVMState((unsigned char*)buffer);
-        if (sz != tickTransactionsSwapVM.getVmStateSize())
-        {
-            logToConsole(L"Something went wrong when dumping tickData VM state");
-            freePool(buffer);
-            return false;
-        }
-        auto writtenSize = saveLargeFile(SNAPSHOT_TRANSACTIONS_FILE_NAME, tickTransactionsSwapVM.getVmStateSize(), (unsigned char*)buffer, directory);
-        if (writtenSize != tickTransactionsSwapVM.getVmStateSize())
+        if (!saveSwapVmState(tickTransactionsSwapVM, SNAPSHOT_TRANSACTIONS_FILE_NAME, directory))
         {
             outTotalTransactionSize = -1;
             return false;
         }
-        freePool(buffer);
-        outTotalTransactionSize = writtenSize;
+        outTotalTransactionSize = tickTransactionsSwapVM.getVmStateSize();
         return true;
 #else
         // saving from the first tx of from tick to the last tx of (totick)

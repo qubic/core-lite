@@ -13,6 +13,10 @@
 #include <cstdlib>
 #include <cstdbool>
 #include <cstdio>
+#if defined(__linux__)
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 inline void* qVirtualAlloc(const unsigned long long size, bool commitMem, bool hugePageHint = true);
 inline void* qVirtualCommit(void* address, const unsigned long long size);
@@ -142,6 +146,34 @@ static void zeroPool(void* buffer, const unsigned long long size)
     setMem(buffer, size, 0);
 }
 
+// Gives the all-zero pages of a buffer back to the system; they still read as zero. Only for private
+// anonymous memory (heap block or anonymous mapping) while nothing else writes it.
+static void releaseZeroPages(void* buffer, const unsigned long long size)
+{
+#if defined(__linux__)
+    static const uintptr_t pageSize = (uintptr_t)sysconf(_SC_PAGESIZE);
+    const uintptr_t firstPage = ((uintptr_t)buffer + pageSize - 1) & ~(pageSize - 1);
+    const uintptr_t endPage = ((uintptr_t)buffer + size) & ~(pageSize - 1);
+    uintptr_t runStart = 0;
+    for (uintptr_t page = firstPage; page <= endPage; page += pageSize)
+    {
+        const bool isZero = page < endPage && isZeroBlock((const void*)page, pageSize);
+        if (isZero && !runStart)
+        {
+            runStart = page;
+        }
+        else if (!isZero && runStart)
+        {
+            madvise((void*)runStart, page - runStart, MADV_DONTNEED);
+            runStart = 0;
+        }
+    }
+#else
+    (void)buffer;
+    (void)size;
+#endif
+}
+
 #else
 
 static bool allocPoolWithErrorLog(const CHAR16* name, const unsigned long long size, void** buffer, const int LINE, bool needZerOut = true)
@@ -195,6 +227,12 @@ static bool allocFileBackedPoolWithErrorLog(const CHAR16* name, const unsigned l
 static void zeroPool(void* buffer, const unsigned long long size)
 {
     setMem(buffer, size, 0);
+}
+
+static void releaseZeroPages(void* buffer, const unsigned long long size)
+{
+    (void)buffer;
+    (void)size;
 }
 
 #endif

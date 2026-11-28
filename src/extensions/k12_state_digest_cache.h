@@ -107,6 +107,8 @@ namespace K12StateDigestCache
         void* p = aligned_alloc((size_t)ps, (size_t)allocLen);
         if (!p)
             return false;
+        // A state is a mostly empty table: with huge pages one written byte would hold 2 MiB.
+        madvise(p, allocLen, MADV_NOHUGEPAGE);
         setMem(p, allocLen, 0);
         *buffer = p;
         return true;

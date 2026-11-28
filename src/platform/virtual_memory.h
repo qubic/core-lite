@@ -1814,7 +1814,10 @@ public:
         return pageSize * (numCachePage + 1) + isPageWrittenToDiskSize  + sizeof(cachePageId) + sizeof(lastAccessedTimestamp) + 8 + totalOffsetModeExtraSize;
     }
 
-    unsigned long long dumpVMState(unsigned char* buffer)
+    // Hands the state to the sink piece by piece, in the order loadVMState() reads it. The lock is held
+    // until the last piece is taken, so all pieces belong to one moment.
+    template <typename Sink>
+    bool dumpVMState(Sink&& sink)
     {
         acquireMemLock();
         // Drain in-flight IO so a slot isn't snapshotted mid-fread; a slot still LOADING after the
@@ -1825,46 +1828,25 @@ public:
             sleepMilliseconds(1);
             acquireMemLock();
         }
-        unsigned long long ret = 0;
-        for (int i = 0; i <= numCachePage; i++)
+        bool taken = true;
+        for (int i = 0; taken && i <= numCachePage; i++)
         {
-            copyMem(buffer, cache[i], pageSize);
-            buffer += pageSize;
+            taken = sink((const unsigned char*)cache[i], pageSize);
         }
-        ret += (numCachePage+1) * pageSize;
-
-        copyMem(buffer, isPageWrittenToDisk, isPageWrittenToDiskSize);
-        ret += isPageWrittenToDiskSize;
-        buffer += isPageWrittenToDiskSize;
+        taken = taken && sink((const unsigned char*)isPageWrittenToDisk, isPageWrittenToDiskSize);
 
         if (mode == SwapMode::OFFSET_MODE)
         {
-            copyMem(buffer, pageExtraBytesBuffer, pageExtraBytesBufferSize);
-            buffer += pageExtraBytesBufferSize;
-            ret += pageExtraBytesBufferSize;
-
-            copyMem(buffer, pageHasExtraBytes, pageHasExtraBytesBufferSize);
-            buffer += pageHasExtraBytesBufferSize;
-            ret += pageHasExtraBytesBufferSize;
-
-            copyMem(buffer, lastestPageExtraBytesOffsetAccessed, lastestPageExtraBytesOffsetAccessedBufferSize);
-            buffer += lastestPageExtraBytesOffsetAccessedBufferSize;
-            ret += lastestPageExtraBytesOffsetAccessedBufferSize;
+            taken = taken && sink((const unsigned char*)pageExtraBytesBuffer, pageExtraBytesBufferSize);
+            taken = taken && sink((const unsigned char*)pageHasExtraBytes, pageHasExtraBytesBufferSize);
+            taken = taken && sink((const unsigned char*)lastestPageExtraBytesOffsetAccessed, lastestPageExtraBytesOffsetAccessedBufferSize);
         }
 
-        copyMem(buffer, lastAccessedTimestamp, sizeof(lastAccessedTimestamp));
-        buffer += sizeof(lastAccessedTimestamp);
-        ret += sizeof(lastAccessedTimestamp);
-
-        copyMem(buffer, cachePageId, sizeof(cachePageId));
-        ret += sizeof(cachePageId);
-        buffer += sizeof(cachePageId);
-
-        *((unsigned long long*)buffer) = currentPageId;
-        buffer += 8;
-        ret += 8;
+        taken = taken && sink((const unsigned char*)lastAccessedTimestamp, sizeof(lastAccessedTimestamp));
+        taken = taken && sink((const unsigned char*)cachePageId, sizeof(cachePageId));
+        taken = taken && sink((const unsigned char*)&currentPageId, sizeof(currentPageId));
         RELEASE(memLock);
-        return ret;
+        return taken;
     }
 
     unsigned long long loadVMState(unsigned char* buffer)

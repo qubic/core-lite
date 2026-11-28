@@ -7,6 +7,9 @@
 #include <filesystem>
 #include <limits>
 #include "host_file.h"
+#if defined(__linux__)
+#include <unistd.h>
+#endif
 #endif
 #include <lib/platform_common/processor.h>
 #include <lib/platform_common/compiler_optimization.h>
@@ -456,14 +459,15 @@ static long long load(const CHAR16* fileName, unsigned long long totalSize, unsi
 #endif
 }
 
-static long long save(const CHAR16* fileName, unsigned long long totalSize, const unsigned char* buffer, const CHAR16* directory = NULL)
-{
 #ifdef NO_UEFI
+// Opens fileName for writing, creating its directory first.
+static FILE* openHostFileForSave(const CHAR16* fileName, const CHAR16* directory)
+{
     const CHAR16* writeDirectory = liteShadowWriteDir(directory, fileName);
     FILE* file = nullptr;
     if (hasHostDirectory(writeDirectory) && !createDir(writeDirectory))
     {
-        return -1;
+        return nullptr;
     }
     if (openHostFile(&file, getHostFilePath(fileName, writeDirectory), HostFileMode::WriteBinary) != 0 || !file)
     {
@@ -472,10 +476,74 @@ static long long save(const CHAR16* fileName, unsigned long long totalSize, cons
 #else
         print_wstr(L"Error opening file in save %s!\n", wchar_to_string((fileName)).c_str());
 #endif
+        return nullptr;
+    }
+    return file;
+}
+
+// Writes at the current position. On Linux all-zero blocks are seeked over, so the file system keeps a
+// hole there; a read returns the same bytes.
+static bool writeToHostFile(FILE* file, const unsigned char* buffer, unsigned long long size, bool& endsWithHole)
+{
+#if defined(__linux__)
+    constexpr unsigned long long blockSize = 4096;
+    unsigned long long offset = 0;
+    while (offset < size)
+    {
+        // A short last block is written, so only whole blocks become holes.
+        const bool runIsZero = size - offset >= blockSize && isZeroBlock(buffer + offset, blockSize);
+        unsigned long long runEnd = offset;
+        while (runEnd < size && (size - runEnd >= blockSize && isZeroBlock(buffer + runEnd, blockSize)) == runIsZero)
+        {
+            runEnd += size - runEnd < blockSize ? size - runEnd : blockSize;
+        }
+        const unsigned long long runSize = runEnd - offset;
+        const bool runSucceeded = runIsZero
+            ? fseeko(file, (off_t)runSize, SEEK_CUR) == 0
+            : fwrite(buffer + offset, 1, runSize, file) == runSize;
+        if (!runSucceeded)
+        {
+            return false;
+        }
+        endsWithHole = runIsZero;
+        offset = runEnd;
+    }
+    return true;
+#else
+    (void)endsWithHole;
+    return fwrite(buffer, 1, size, file) == size;
+#endif
+}
+
+// A seek alone does not grow a file, so one that ends in a hole gets its length set here.
+static bool closeHostFile(FILE* file, bool endsWithHole)
+{
+    bool lengthSucceeded = true;
+#if defined(__linux__)
+    if (endsWithHole)
+    {
+        const off_t length = ftello(file);
+        lengthSucceeded = length >= 0 && fflush(file) == 0 && ftruncate(fileno(file), length) == 0;
+    }
+#else
+    (void)endsWithHole;
+#endif
+    const bool closeSucceeded = fclose(file) == 0;
+    return lengthSucceeded && closeSucceeded;
+}
+#endif
+
+static long long save(const CHAR16* fileName, unsigned long long totalSize, const unsigned char* buffer, const CHAR16* directory = NULL)
+{
+#ifdef NO_UEFI
+    FILE* file = openHostFileForSave(fileName, directory);
+    if (!file)
+    {
         return -1;
     }
-    const bool writeSucceeded = fwrite(buffer, 1, totalSize, file) == totalSize;
-    const bool closeSucceeded = fclose(file) == 0;
+    bool endsWithHole = false;
+    const bool writeSucceeded = writeToHostFile(file, buffer, totalSize, endsWithHole);
+    const bool closeSucceeded = closeHostFile(file, endsWithHole);
     if (!writeSucceeded || !closeSucceeded)
     {
 #ifdef _MSC_VER
@@ -1604,6 +1672,101 @@ static long long loadLargeFile(CHAR16* fileName, unsigned long long totalSize, u
     }
     return totalReadSize;
 }
+
+#ifdef NO_UEFI
+// Writes pieces in sequence into the file layout of saveLargeFile(): one file below FILE_CHUNK_SIZE,
+// else fileName.000, fileName.001, ... of FILE_CHUNK_SIZE bytes each.
+class LargeFileWriter
+{
+public:
+    bool open(CHAR16* fileName, unsigned long long totalSize, CHAR16* directory)
+    {
+        mFileName = fileName;
+        mDirectory = directory;
+        mTotalSize = totalSize;
+        mWrittenSize = 0;
+        mChunkId = 0;
+        mFailed = !openNextFile();
+        return !mFailed;
+    }
+
+    bool write(const unsigned char* buffer, unsigned long long size)
+    {
+        while (size && !mFailed)
+        {
+            if (!mFile)
+            {
+                // More bytes than announced in open().
+                mFailed = true;
+                break;
+            }
+            const unsigned long long roomInFile = mFileEndOffset - mWrittenSize;
+            const unsigned long long partSize = size < roomInFile ? size : roomInFile;
+            if (!writeToHostFile(mFile, buffer, partSize, mEndsWithHole))
+            {
+                mFailed = true;
+            }
+            buffer += partSize;
+            size -= partSize;
+            mWrittenSize += partSize;
+            if (mWrittenSize == mFileEndOffset && (!closeCurrentFile() || (mWrittenSize < mTotalSize && !openNextFile())))
+            {
+                mFailed = true;
+            }
+        }
+        return !mFailed;
+    }
+
+    // True only if exactly totalSize bytes went out and every file closed cleanly.
+    bool close()
+    {
+        if (mFile && !closeCurrentFile())
+        {
+            mFailed = true;
+        }
+        return !mFailed && mWrittenSize == mTotalSize;
+    }
+
+private:
+    bool openNextFile()
+    {
+        mEndsWithHole = false;
+        if (mTotalSize < FILE_CHUNK_SIZE)
+        {
+            mFileEndOffset = mTotalSize;
+            mFile = openHostFileForSave(mFileName, mDirectory);
+            return mFile != nullptr;
+        }
+        CHAR16 fileNameWithChunkId[64];
+        setText(fileNameWithChunkId, mFileName);
+        appendText(fileNameWithChunkId, L".XXX");
+        addEpochToFileName(fileNameWithChunkId, getTextSize(fileNameWithChunkId, 64) + 1, mChunkId);
+        mChunkId++;
+        const unsigned long long remainingSize = mTotalSize - mWrittenSize;
+        mFileEndOffset = mWrittenSize + (remainingSize < FILE_CHUNK_SIZE ? remainingSize : FILE_CHUNK_SIZE);
+        mFile = openHostFileForSave(fileNameWithChunkId, mDirectory);
+        return mFile != nullptr;
+    }
+
+    bool closeCurrentFile()
+    {
+        FILE* file = mFile;
+        mFile = nullptr;
+        return closeHostFile(file, mEndsWithHole);
+    }
+
+    CHAR16* mFileName = nullptr;
+    CHAR16* mDirectory = nullptr;
+    FILE* mFile = nullptr;
+    unsigned long long mTotalSize = 0;
+    unsigned long long mWrittenSize = 0;
+    // Offset in the whole stream at which the open file is full.
+    unsigned long long mFileEndOffset = 0;
+    int mChunkId = 0;
+    bool mEndsWithHole = false;
+    bool mFailed = false;
+};
+#endif
 
 // Asynchorous load a large file
 // File with size greater than FILE_CHUNK_SIZE will be break into smaller file to be written. So this function will load the smaller chunks
